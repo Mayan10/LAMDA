@@ -205,3 +205,6 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+#PRD Docs
+LAMDA_Scrapers_PRD.md
