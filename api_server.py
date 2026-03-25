@@ -4,6 +4,11 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime
 import json
 import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
 import logging
 from typing import Dict, List, Any
 from intelligence_processor import IntelligenceProcessor, ScraperData

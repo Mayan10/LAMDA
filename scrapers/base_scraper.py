@@ -6,6 +6,11 @@ in-memory TTL cache, node-to-city mapping, common endpoints, colorlog logging.
 """
 
 import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
 import json
 import time
 import logging
