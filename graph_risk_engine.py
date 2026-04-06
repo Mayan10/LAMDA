@@ -137,26 +137,55 @@ class GraphRiskEngine:
     def load_graph_structure(self, nodes_file: str, edges_file: str):
         with open(nodes_file, 'r') as f:
             nodes_data = json.load(f)
-        
-        for node in nodes_data["nodes"]:
+
+        with open(edges_file, 'r') as f:
+            edges_data = json.load(f)
+
+        self.load_graph_structure_from_data(
+            nodes_data.get("nodes", []),
+            edges_data.get("edges", []),
+        )
+
+    def load_graph_structure_from_data(self, nodes: List[Dict], edges: List[Dict]):
+        self.nodes = {}
+        self.edges = []
+
+        for node in nodes:
             self.nodes[node["node_id"]] = GraphNode(
                 node_id=node["node_id"],
                 latitude=node["latitude"],
                 longitude=node["longitude"],
-                risk_vector=np.zeros(6)
+                risk_vector=np.zeros(6),
             )
-        with open(edges_file, 'r') as f:
-            edges_data = json.load(f)
-        
-        for edge in edges_data["edges"]:
-            self.edges.append(GraphEdge(
-                source=edge["source"],
-                target=edge["target"],
-                distance_km=edge["distance_km"],
-                trade_volume=edge.get("trade_volume", 1000000)
-            ))
-        
+
+        for edge in edges:
+            self.edges.append(
+                GraphEdge(
+                    source=edge["source"],
+                    target=edge["target"],
+                    distance_km=edge["distance_km"],
+                    trade_volume=edge.get("trade_volume", 0.0),
+                )
+            )
+
+        self._store_edges()
         print(f"Loaded graph: {len(self.nodes)} nodes, {len(self.edges)} edges")
+
+    def _store_edges(self):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        for edge in self.edges:
+            cursor.execute(
+                """
+                INSERT OR REPLACE INTO edges (source, target, distance_km, trade_volume)
+                VALUES (?, ?, ?, ?)
+                """,
+                (edge.source, edge.target, edge.distance_km, edge.trade_volume),
+            )
+
+        conn.commit()
+        conn.close()
     
     def update_risk_vectors(self, risk_vectors_file: str):
         with open(risk_vectors_file, 'r') as f:
@@ -175,13 +204,39 @@ class GraphRiskEngine:
                 ])
         
         print(f"Updated {len(data['risk_vectors'])} node risk vectors")
+
+    def update_edge_trade_volumes(self, node_trade_map: Dict[str, float]):
+        updated_edges: List[GraphEdge] = []
+        for edge in self.edges:
+            source_trade = max(float(node_trade_map.get(edge.source, 0.0)), 0.0)
+            target_trade = max(float(node_trade_map.get(edge.target, 0.0)), 0.0)
+
+            if source_trade == 0.0 and target_trade == 0.0:
+                trade_volume = 0.0
+            else:
+                trade_volume = (source_trade + target_trade) / 2
+
+            updated_edges.append(
+                GraphEdge(
+                    source=edge.source,
+                    target=edge.target,
+                    distance_km=edge.distance_km,
+                    trade_volume=trade_volume,
+                )
+            )
+
+        self.edges = updated_edges
+        self._store_edges()
     
     def _build_pytorch_geometric_data(self) -> Data:
         node_ids = list(self.nodes.keys())
         node_id_to_idx = {nid: idx for idx, nid in enumerate(node_ids)}
-        
+
+        if not node_ids:
+            raise ValueError("Graph has no nodes loaded")
+
         x = torch.tensor(
-            [self.nodes[nid].risk_vector for nid in node_ids],
+            np.array([self.nodes[nid].risk_vector for nid in node_ids]),
             dtype=torch.float32
         )
         edge_index = []
@@ -198,8 +253,12 @@ class GraphRiskEngine:
                 weight = 1.0 / (1.0 + edge.distance_km / 1000.0)
                 edge_weights.extend([weight, weight])
         
-        edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
-        edge_weights = torch.tensor(edge_weights, dtype=torch.float32)
+        if not edge_index:
+            edge_index = torch.empty((2, 0), dtype=torch.long)
+            edge_weights = torch.empty((0,), dtype=torch.float32)
+        else:
+            edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
+            edge_weights = torch.tensor(edge_weights, dtype=torch.float32)
         
         data = Data(x=x, edge_index=edge_index, edge_attr=edge_weights)
         
@@ -207,12 +266,15 @@ class GraphRiskEngine:
     
     def propagate_risks(self) -> Dict[str, np.ndarray]:
         print("Running risk propagation through graph")
-        
+
         data, node_ids = self._build_pytorch_geometric_data()
-        
-        self.model.eval()
-        with torch.no_grad():
-            updated_features = self.model(data.x, data.edge_index)
+
+        if data.edge_index.numel() == 0:
+            updated_features = data.x
+        else:
+            self.model.eval()
+            with torch.no_grad():
+                updated_features = self.model(data.x, data.edge_index)
         
         updated_risks = {}
         for idx, node_id in enumerate(node_ids):
@@ -247,15 +309,23 @@ class GraphRiskEngine:
             """, (node_id, timestamp, float(rv[0]), float(rv[1]), float(rv[2]),
                   float(rv[3]), float(rv[4]), float(rv[5]), overall_risk))
         
-        cursor.execute("""
+        cursor.execute(
+            """
             DELETE FROM risk_history
-            WHERE id NOT IN (
-                SELECT id FROM risk_history
-                WHERE node_id = risk_history.node_id
-                ORDER BY timestamp DESC
-                LIMIT ?
+            WHERE id IN (
+                SELECT id FROM (
+                    SELECT id,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY node_id
+                               ORDER BY timestamp DESC
+                           ) AS row_num
+                    FROM risk_history
+                )
+                WHERE row_num > ?
             )
-        """, (self.history_length,))
+            """,
+            (self.history_length,),
+        )
         
         conn.commit()
         conn.close()
@@ -329,64 +399,4 @@ class GraphRiskEngine:
         return history
 
 if __name__ == "__main__":
-    print("Graph Risk Engine\n")
-    
-    engine = GraphRiskEngine()
-    
-    print("Creating sample graph structure")
-    
-    sample_nodes = {
-        "nodes": [
-            {"node_id": "Hong_Kong", "latitude": 22.3193, "longitude": 114.1694},
-            {"node_id": "Singapore", "latitude": 1.3521, "longitude": 103.8198},
-            {"node_id": "Shanghai", "latitude": 31.2304, "longitude": 121.4737},
-            {"node_id": "Tokyo", "latitude": 35.6762, "longitude": 139.6503},
-            {"node_id": "Los_Angeles", "latitude": 34.0522, "longitude": -118.2437}
-        ]
-    }
-    
-    sample_edges = {
-        "edges": [
-            {"source": "Hong_Kong", "target": "Singapore", "distance_km": 2590, "trade_volume": 5000000},
-            {"source": "Hong_Kong", "target": "Shanghai", "distance_km": 1213, "trade_volume": 8000000},
-            {"source": "Singapore", "target": "Shanghai", "distance_km": 3898, "trade_volume": 4000000},
-            {"source": "Shanghai", "target": "Tokyo", "distance_km": 1768, "trade_volume": 6000000},
-            {"source": "Tokyo", "target": "Los_Angeles", "distance_km": 8806, "trade_volume": 7000000}
-        ]
-    }
-    
-    with open("graph_nodes.json", "w") as f:
-        json.dump(sample_nodes, f, indent=2)
-    
-    with open("graph_edges.json", "w") as f:
-        json.dump(sample_edges, f, indent=2)
-    
-    engine.load_graph_structure("graph_nodes.json", "graph_edges.json")
-    
-    import os
-    if os.path.exists("risk_vectors_output.json"):
-        print("\nLoading risk vectors from Intelligence Processor")
-        engine.update_risk_vectors("risk_vectors_output.json")
-    else:
-        print("\nrisk_vectors_output.json not found. Using random risk vectors for demo.")
-        for node_id in engine.nodes.keys():
-            engine.nodes[node_id].risk_vector = np.random.uniform(0.2, 0.8, 6)
-
-    updated_risks = engine.propagate_risks()
-    
-    print("\nUpdated Risk Scores\n")
-    for node_id, risk_vector in updated_risks.items():
-        overall = np.mean(risk_vector[:5])
-        print(f"{node_id}:")
-        print(f"  GSCPI: {risk_vector[0]:.3f}, News: {risk_vector[1]:.3f}, "
-              f"Political: {risk_vector[2]:.3f}")
-        print(f"  Trade: {risk_vector[3]:.3f}, Weather: {risk_vector[4]:.3f}, "
-              f"Reporter: {risk_vector[5]:.3f}")
-        print(f"  Overall Risk: {overall:.3f}")
-        print()
-    
-    engine.store_snapshot()
-    
-    engine.export_graph_state("graph_state.json")
-    
-    print("\nGraph Risk Engine processing complete")
+    print("Run api_server.py to execute the live graph pipeline.")

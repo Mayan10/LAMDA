@@ -8,11 +8,12 @@ This system provides real-time supply chain risk assessment and optimal route re
 
 ### Key Features
 
-**AI-Powered Intelligence Processing** - Claude API analyzes unstructured text data (news, political reports, weather)  
+**AI-Powered Intelligence Processing** - Claude API analyzes unstructured text data when available, with local heuristic fallback when it is not  
 **Graph Neural Network** - Spatial risk propagation considering geographical proximity and trade relationships  
 **Temporal Memory** - Tracks risk history for trend analysis (last 10 updates)  
 **Multi-Objective Optimization** - Balances risk, distance, time, and trade volume  
 **REST API** - Easy integration with web/mobile frontends  
+**Integrated Scraper Runtime** - The backend can use the scrapers directly in-process or call separately hosted scraper services  
 **Automated Updates** - Background worker updates graph every 30 minutes  
 **Production-Ready** - Database persistence, error handling, logging  
 
@@ -70,9 +71,12 @@ This system provides real-time supply chain risk assessment and optimal route re
 - pip (Python package manager)
 - SQLite3 (comes with Python)
 
-### Required API Keys
-- **Anthropic API Key** - For Claude AI analysis  
-  Get it at: https://console.anthropic.com/
+### Optional API Keys
+- **SERPAPI_API_KEY** - Recommended for live news/search enrichment
+- **OPENWEATHERMAP_API_KEY** - Optional richer weather data
+- **ANTHROPIC_API_KEY** - Optional Claude enrichment for semantic scoring
+
+The backend will still start without `ANTHROPIC_API_KEY`; it falls back to deterministic local scoring until you add the key.
 
 ### Hardware Requirements
 - **Minimum**: 4GB RAM, 2 CPU cores
@@ -85,16 +89,10 @@ This system provides real-time supply chain risk assessment and optimal route re
 
 ### Step 1: Clone/Download the System
 
-Place all 4 scripts in a directory:
+Clone the repo to your machine:
 ```bash
-mkdir supply-chain-risk-system
-cd supply-chain-risk-system
-
-# Copy the 4 scripts:
-# - intelligence_processor.py
-# - graph_risk_engine.py
-# - route_optimizer.py
-# - api_server.py
+git clone <your-repo-url> lamda
+cd lamda
 ```
 
 ### Step 2: Install Dependencies
@@ -104,97 +102,43 @@ cd supply-chain-risk-system
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
-# Install required packages
-pip install anthropic torch torchvision torchaudio
-pip install torch-geometric
-pip install flask flask-cors
-pip install apscheduler
-pip install numpy scipy
-
-# For PyTorch Geometric dependencies
-pip install torch-scatter torch-sparse -f https://data.pyg.org/whl/torch-2.0.0+cpu.html
+# Install backend dependencies
+pip install -r requirements.txt
 ```
 
 ### Step 3: Set Environment Variables
 
 ```bash
-# Set Anthropic API key
-export ANTHROPIC_API_KEY='your-api-key-here'
+# Copy the sample env file
+cp .env.example .env
 
-# On Windows:
-set ANTHROPIC_API_KEY=your-api-key-here
+# Edit the values you have available
+# SERPAPI_API_KEY=...
+# OPENWEATHERMAP_API_KEY=...
+# ANTHROPIC_API_KEY=...   # optional
 ```
 
-### Step 4: Prepare Graph Structure Files
+### Step 4: Start the Backend
 
-Create two JSON files defining your supply chain network:
-
-**graph_nodes.json** - Define cities/ports:
-```json
-{
-  "nodes": [
-    {
-      "node_id": "Hong_Kong",
-      "latitude": 22.3193,
-      "longitude": 114.1694
-    },
-    {
-      "node_id": "Singapore",
-      "latitude": 1.3521,
-      "longitude": 103.8198
-    }
-  ]
-}
+```bash
+python api_server.py
 ```
 
-**graph_edges.json** - Define routes:
-```json
-{
-  "edges": [
-    {
-      "source": "Hong_Kong",
-      "target": "Singapore",
-      "distance_km": 2590,
-      "trade_volume": 5000000
-    }
-  ]
-}
+On first start the backend now:
+- builds the graph structure automatically from the supported nodes
+- fetches live data from the integrated scraper layer
+- generates `graph_nodes.json`, `graph_edges.json`, `graph_state.json`, `risk_vectors_output.json`, and `supply_chain_graph.db`
+- starts the API on `http://localhost:5001`
+
+If you want the API server to call separately running scraper services instead of using the scrapers directly in-process, set:
+
+```bash
+SCRAPER_HTTP_ENABLED=true
 ```
 
 ---
 
 ## Usage
-
-### Running Individual Scripts
-
-#### Test Script 1: Intelligence Processor
-```bash
-python intelligence_processor.py
-```
-This will:
-- Process sample scraper data
-- Call Claude API for text analysis
-- Generate `risk_vectors_output.json`
-
-#### Test Script 2: Graph Risk Engine
-```bash
-python graph_risk_engine.py
-```
-This will:
-- Load graph structure
-- Load risk vectors from Script 1
-- Propagate risks through GNN
-- Generate `graph_state.json`
-- Create SQLite database `supply_chain_graph.db`
-
-#### Test Script 3: Route Optimizer
-```bash
-python route_optimizer.py
-```
-This will:
-- Load graph state from Script 2
-- Find optimal routes (demo: Hong Kong → Los Angeles)
-- Generate `optimized_routes.json`
 
 ### Running the Full API Server
 
@@ -204,14 +148,49 @@ python api_server.py
 
 The server will:
 1. Initialize all components
-2. Run initial graph update (or load existing graph state)
-3. Start background worker (updates every 30 min)
-4. Start Flask API on **http://localhost:5001** (default; port 5000 is often used by macOS AirPlay)
+2. Build graph files automatically if they do not exist yet
+3. Run the initial graph update
+4. Start the background worker (updates every 30 min)
+5. Start Flask API on **http://localhost:5001**
 
 To use a different port:
 ```bash
 PORT=8080 python api_server.py
 ```
+
+### Linux 24x7 Deployment
+
+1. Install system packages:
+```bash
+sudo apt update
+sudo apt install -y python3 python3-venv python3-pip git
+```
+2. Clone the repo onto the laptop:
+```bash
+sudo mkdir -p /opt/lamda
+sudo chown "$USER":"$USER" /opt/lamda
+git clone <your-repo-url> /opt/lamda
+cd /opt/lamda
+python3 -m venv venv
+source venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+cp .env.example .env
+```
+3. Edit `/opt/lamda/.env` and set the keys you have. For the single-service setup, keep `SCRAPER_HTTP_ENABLED=false`.
+4. Copy the example systemd unit:
+```bash
+sudo cp deploy/lamda-api.service.example /etc/systemd/system/lamda-api.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now lamda-api
+```
+5. Monitor the service:
+```bash
+sudo systemctl status lamda-api
+journalctl -u lamda-api -f
+```
+
+If you want the app reachable from other machines, open port `5001` in the firewall or place Nginx in front of it as a reverse proxy.
 
 ---
 

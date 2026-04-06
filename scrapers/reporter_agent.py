@@ -1,11 +1,10 @@
 """
 LAMDA Reporter Credibility Agent — Port 8006
 Scores the reliability of data sources for each node.
-Semi-static service with hardcoded priors and optional dynamic adjustment
-via internal HTTP calls to the other scrapers.
+Uses neutral starting scores and adjusts them dynamically based on the
+quality and richness of other scraper responses.
 """
 
-import json
 from flask import jsonify
 import requests as http_requests
 
@@ -13,17 +12,6 @@ import sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 from base_scraper import BaseScraper, SUPPORTED_NODES
-
-# ---------------------------------------------------------------------------
-# Base credibility priors
-# ---------------------------------------------------------------------------
-BASE_CREDIBILITY = {
-    "Hong_Kong":   {"news": 0.80, "political": 0.70, "weather": 0.90},
-    "Singapore":   {"news": 0.85, "political": 0.80, "weather": 0.92},
-    "Shanghai":    {"news": 0.70, "political": 0.60, "weather": 0.88},
-    "Tokyo":       {"news": 0.88, "political": 0.85, "weather": 0.95},
-    "Los_Angeles": {"news": 0.90, "political": 0.87, "weather": 0.95},
-}
 
 # Other scraper endpoints for dynamic checks
 SCRAPER_ENDPOINTS = {
@@ -56,10 +44,7 @@ class ReporterAgent(BaseScraper):
 
     # ------------------------------------------------------------------
     def _compute_credibility(self, node_id: str) -> dict:
-        base = BASE_CREDIBILITY.get(
-            node_id, {"news": 0.75, "political": 0.70, "weather": 0.85}
-        )
-        scores = {k: v for k, v in base.items()}
+        scores = {"news": 0.5, "political": 0.5, "weather": 0.55}
 
         # Dynamic adjustment: probe other scrapers
         for category, url_template in SCRAPER_ENDPOINTS.items():
@@ -68,32 +53,13 @@ class ReporterAgent(BaseScraper):
                 resp = http_requests.get(url, timeout=5)
                 if resp.status_code == 200:
                     data = resp.json()
-                    # Check if response has substantive data (not just fallback)
-                    has_data = False
-                    if category == "news" and data.get("sources"):
-                        has_data = len(data["sources"]) >= 2
-                    elif category == "political" and data.get("report"):
-                        has_data = len(data["report"]) > 50
-                    elif category == "weather" and data.get("conditions"):
-                        has_data = "unavailable" not in data["conditions"].lower()
-
-                    if has_data:
-                        # Multiple independent sources found → boost
-                        scores[category] = min(1.0, scores[category] + 0.10)
-                        self.logger.info(
-                            f"Boosted {category} credibility for {node_id} to {scores[category]:.2f}"
-                        )
-                    else:
-                        # Only 1 source or thin data → lower
-                        scores[category] = max(0.0, scores[category] - 0.15)
-                        self.logger.info(
-                            f"Lowered {category} credibility for {node_id} to {scores[category]:.2f}"
-                        )
+                    scores[category] = self._score_category(category, data, scores[category])
+                    self.logger.info(
+                        f"Adjusted {category} credibility for {node_id} to {scores[category]:.2f}"
+                    )
                 else:
-                    # Scraper returned error → lower credibility
                     scores[category] = max(0.0, scores[category] - 0.15)
             except Exception as exc:
-                # Scraper unreachable — keep base prior, log warning
                 self.logger.warning(
                     f"Could not reach {category} scraper for {node_id}: {exc}"
                 )
@@ -106,6 +72,38 @@ class ReporterAgent(BaseScraper):
             "scores": scores,
             "updated_at": self.utc_timestamp(),
         }
+
+    def _score_category(self, category: str, data: dict, base_score: float) -> float:
+        score = base_score
+
+        if category == "news":
+            sources = data.get("sources", [])
+            summary = data.get("summary", "")
+            score += min(len(sources), 4) * 0.1
+            if len(summary) > 120:
+                score += 0.1
+
+        elif category == "political":
+            report = data.get("report", "")
+            if len(report) > 80:
+                score += 0.15
+            if any(
+                keyword in report.lower()
+                for keyword in ("sanction", "restriction", "conflict", "protest", "strike")
+            ):
+                score += 0.1
+
+        elif category == "weather":
+            conditions = data.get("conditions", "")
+            alerts = data.get("alerts", [])
+            if conditions and "unavailable" not in conditions.lower():
+                score += 0.15
+            if any(token in conditions.lower() for token in ("°c", "winds", "precipitation")):
+                score += 0.1
+            if alerts:
+                score += 0.1
+
+        return round(max(0.1, min(score, 0.95)), 2)
 
 
 if __name__ == "__main__":

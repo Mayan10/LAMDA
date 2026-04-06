@@ -1,7 +1,7 @@
 numpy==1.24.3
 scipy==1.10.1
 
-anthropic==0.23.1
+google-genai==1.30.0
 
 torch==2.0.1
 torchvision==0.15.2
@@ -19,8 +19,7 @@ APScheduler==3.10.1
 pandas==2.0.3
 
 requests==2.31.0
-
-sqlite3
+google-search-results==2.4.2
 
 python-dateutil==2.8.2
 pytz==2023.3
@@ -30,4 +29,4 @@ black==23.3.0
 flake8==6.0.0
 
 colorlog==6.7.0
-python-dotenv
+python-dotenv==1.0.1

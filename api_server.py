@@ -4,16 +4,22 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime
 import json
 import os
-from dotenv import load_dotenv
+
+try:
+    from dotenv import load_dotenv
+except Exception:  # pragma: no cover - optional local convenience dependency
+    def load_dotenv():
+        return False
 
 # Load environment variables from .env file
 load_dotenv()
 
 import logging
-from typing import Dict, List, Any
+from typing import List
 from intelligence_processor import IntelligenceProcessor, ScraperData
 from graph_risk_engine import GraphRiskEngine
 from route_optimizer import RouteOptimizer
+from scraper_orchestrator import ScraperOrchestrator
 
 app = Flask(__name__)
 CORS(app)
@@ -27,82 +33,31 @@ logger = logging.getLogger(__name__)
 intelligence_processor = None
 graph_engine = None
 route_optimizer = None
+scraper_orchestrator = ScraperOrchestrator()
 
 CONFIG = {
-    "UPDATE_INTERVAL_MINUTES": 30,
-    "GRAPH_STATE_FILE": "graph_state.json",
-    "RISK_VECTORS_FILE": "risk_vectors_output.json",
-    "DB_PATH": "supply_chain_graph.db",
-    "GRAPH_NODES_FILE": "graph_nodes.json",
-    "GRAPH_EDGES_FILE": "graph_edges.json"
+    "UPDATE_INTERVAL_MINUTES": int(os.getenv("UPDATE_INTERVAL_MINUTES", "30")),
+    "GRAPH_STATE_FILE": os.getenv("GRAPH_STATE_FILE", "graph_state.json"),
+    "RISK_VECTORS_FILE": os.getenv("RISK_VECTORS_FILE", "risk_vectors_output.json"),
+    "DB_PATH": os.getenv("DB_PATH", "supply_chain_graph.db"),
+    "GRAPH_NODES_FILE": os.getenv("GRAPH_NODES_FILE", "graph_nodes.json"),
+    "GRAPH_EDGES_FILE": os.getenv("GRAPH_EDGES_FILE", "graph_edges.json"),
+    "PORT": int(os.getenv("PORT", "5001")),
 }
 
+
+def persist_graph_structure(nodes: List[dict], edges: List[dict]):
+    with open(CONFIG["GRAPH_NODES_FILE"], "w") as node_file:
+        json.dump({"nodes": nodes}, node_file, indent=2)
+
+    with open(CONFIG["GRAPH_EDGES_FILE"], "w") as edge_file:
+        json.dump({"edges": edges}, edge_file, indent=2)
+
 def fetch_scraper_data() -> List[ScraperData]:
-    """
-    Fetch data from all 6 scrapers.
-    
-    PRODUCTION INTEGRATION:
-    Replace the mock data below with actual API calls to your scrapers.
-    See SCRAPER_INTEGRATION.md for detailed instructions.
-    
-    Expected scraper endpoints:
-    - GSCPI: GET http://gscpi-scraper:8001/api/latest/{node_id}
-    - News: GET http://news-scraper:8002/api/latest/{node_id}
-    - Political: GET http://political-scraper:8003/api/latest/{node_id}
-    - Trade: GET http://trade-scraper:8004/api/latest/{node_id}
-    - Weather: GET http://weather-scraper:8005/api/latest/{node_id}
-    - Reporter: GET http://reporter-service:8006/api/credibility/{node_id}
-    
-    Returns:
-        List of ScraperData objects
-    """
     logger.info("Fetching data from scrapers")
-    
-    # TODO: PRODUCTION - Replace with actual scraper API calls
-    # Example implementation:
-    # import requests
-    # node_ids = list(graph_engine.nodes.keys())
-    # nodes_data = []
-    # for node_id in node_ids:
-    #     gscpi = requests.get(f"http://gscpi-scraper:8001/api/latest/{node_id}", timeout=10).json()
-    #     news = requests.get(f"http://news-scraper:8002/api/latest/{node_id}", timeout=10).json()
-    #     # ... fetch from all 6 scrapers
-    #     nodes_data.append(ScraperData(
-    #         node_id=node_id,
-    #         gscpi=gscpi["value"],
-    #         trade=trade["volume_usd"],
-    #         news=news["summary"],
-    #         political=political["report"],
-    #         weather=weather["conditions"],
-    #         reporter_credibility=reporter["scores"]
-    #     ))
-    # return nodes_data
-    
-    # Mock data for demonstration (REMOVE IN PRODUCTION)
-    mock_data = [
-        ScraperData(
-            node_id="Hong_Kong",
-            gscpi=1.45,
-            trade=8500000,
-            news="Port operations normal. Minor delays due to customs processing.",
-            political="Stable governance. New trade facilitation measures announced.",
-            weather="Clear skies. No weather disruptions expected this week.",
-            reporter_credibility={"news": 0.85, "political": 0.75, "weather": 0.95}
-        ),
-        ScraperData(
-            node_id="Singapore",
-            gscpi=0.85,
-            trade=12000000,
-            news="Record throughput at Singapore port. Expansion project on schedule.",
-            political="Strong regulatory framework. Free trade agreements active.",
-            weather="Typical tropical conditions. No major weather events forecasted.",
-            reporter_credibility={"news": 0.90, "political": 0.85, "weather": 0.90}
-        ),
-        
-    ]
-    
-    logger.info(f"Fetched data for {len(mock_data)} nodes")
-    return mock_data
+    live_data = scraper_orchestrator.fetch_all()
+    logger.info(f"Fetched data for {len(live_data)} nodes")
+    return live_data
 
 
 def update_graph_pipeline():
@@ -113,6 +68,11 @@ def update_graph_pipeline():
         logger.info("="*60)
         
         scraper_data = fetch_scraper_data()
+        if not scraper_data:
+            raise RuntimeError("No scraper data returned from orchestrator")
+
+        node_trade_map = {item.node_id: item.trade for item in scraper_data}
+        graph_engine.update_edge_trade_volumes(node_trade_map)
         
         logger.info("Step 1: Processing through Intelligence Processor...")
         risk_vectors = intelligence_processor.process_batch(scraper_data)
@@ -169,7 +129,9 @@ def health_check():
         "services": {
             "intelligence_processor": intelligence_processor is not None,
             "graph_engine": graph_engine is not None,
-            "route_optimizer": route_optimizer is not None
+            "route_optimizer": route_optimizer is not None,
+            "anthropic_enabled": bool(getattr(intelligence_processor, "client", None)),
+            "scraper_http_enabled": scraper_orchestrator.http_enabled,
         }
     })
 
@@ -386,25 +348,16 @@ def initialize_system():
         intelligence_processor = IntelligenceProcessor()
         logger.info("2. Initializing Graph Risk Engine...")
         graph_engine = GraphRiskEngine(CONFIG["DB_PATH"])
+
+        logger.info("3. Building graph structure from supported nodes...")
+        nodes, edges = scraper_orchestrator.build_graph_structure()
+        persist_graph_structure(nodes, edges)
+        graph_engine.load_graph_structure_from_data(nodes, edges)
+
+        logger.info("4. Running initial graph update...")
+        update_graph_pipeline()
         
-        if os.path.exists(CONFIG["GRAPH_NODES_FILE"]) and \
-           os.path.exists(CONFIG["GRAPH_EDGES_FILE"]):
-            graph_engine.load_graph_structure(
-                CONFIG["GRAPH_NODES_FILE"],
-                CONFIG["GRAPH_EDGES_FILE"]
-            )
-        else:
-            logger.warning("Graph structure files not found. Please provide:")
-            logger.warning(f"  - {CONFIG['GRAPH_NODES_FILE']}")
-            logger.warning(f"  - {CONFIG['GRAPH_EDGES_FILE']}")
-        
-        if not os.path.exists(CONFIG["GRAPH_STATE_FILE"]):
-            logger.info("3. Running initial graph update...")
-            update_graph_pipeline()
-        else:
-            logger.info("3. Loading existing graph state...")
-        
-        logger.info("4. Initializing Route Optimizer...")
+        logger.info("5. Initializing Route Optimizer...")
         route_optimizer = RouteOptimizer(CONFIG["GRAPH_STATE_FILE"])
         
         logger.info("="*60)
@@ -459,7 +412,7 @@ if __name__ == '__main__':
     try:
         app.run(
             host='0.0.0.0',
-            port=5001,
+            port=CONFIG["PORT"],
             debug=False
         )
     except (KeyboardInterrupt, SystemExit):

@@ -75,7 +75,7 @@ class GSCPIAgent(BaseScraper):
                 f'Return only a JSON: {{"value": <float>}}\n\n'
                 + "\n\n".join(snippets[:8])
             )
-            raw = self.claude_analyze(prompt)
+            raw = self.llm_analyze(prompt)
             parsed = self.parse_json_from_text(raw)
             if parsed and "value" in parsed:
                 value = float(parsed["value"])
