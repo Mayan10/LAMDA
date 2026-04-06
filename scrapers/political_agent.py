@@ -72,7 +72,7 @@ class PoliticalAgent(BaseScraper):
                 f'Return JSON: {{"report": "<text>"}}\n\n'
                 + "\n\n".join(snippets[:8])
             )
-            raw = self.claude_analyze(prompt)
+            raw = self.llm_analyze(prompt)
             parsed = self.parse_json_from_text(raw)
             if parsed:
                 report = parsed.get("report", "")

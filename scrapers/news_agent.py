@@ -70,7 +70,7 @@ class NewsAgent(BaseScraper):
                 f'Return JSON: {{"summary": "<text>", "sources": ["url1", "url2"]}}\n\n'
                 + "\n\n".join(articles[:8])
             )
-            raw = self.claude_analyze(prompt)
+            raw = self.llm_analyze(prompt)
             parsed = self.parse_json_from_text(raw)
             if parsed:
                 summary = parsed.get("summary", "")

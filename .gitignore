@@ -208,3 +208,10 @@ __marimo__/
 
 #PRD Docs
 LAMDA_Scrapers_PRD.md
+
+# Runtime artifacts
+graph_nodes.json
+graph_edges.json
+graph_state.json
+risk_vectors_output.json
+supply_chain_graph.db

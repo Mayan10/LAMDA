@@ -1,0 +1,18 @@
+[Unit]
+Description=LAMDA Supply Chain Risk API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lamda
+Group=lamda
+WorkingDirectory=/opt/lamda
+EnvironmentFile=/opt/lamda/.env
+ExecStart=/opt/lamda/venv/bin/python /opt/lamda/api_server.py
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

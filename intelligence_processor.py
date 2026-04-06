@@ -1,10 +1,16 @@
 import json
 import os
-from typing import Dict, List, Any
+from typing import Dict, List
 from dataclasses import dataclass
-from anthropic import Anthropic
 import numpy as np
 from datetime import datetime
+
+try:
+    from google import genai
+    from google.genai import types as genai_types
+except Exception:  # pragma: no cover - optional dependency at runtime
+    genai = None
+    genai_types = None
 
 
 @dataclass
@@ -33,58 +39,145 @@ class RiskVector:
 class IntelligenceProcessor:
     
     def __init__(self, api_key: str = None):
-        self.api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
-        if not self.api_key:
-            raise ValueError("Anthropic API key required. Set ANTHROPIC_API_KEY env variable.")
-        
-        self.client = Anthropic(api_key=self.api_key)
+        self.provider = os.getenv("INTELLIGENCE_LLM_PROVIDER", "").strip().lower()
+        self.gemini_api_key = api_key or os.getenv("GEMINI_API_KEY")
+        self.client = None
+        self.model = None
+
+        if not self.provider:
+            if self.gemini_api_key and genai is not None:
+                self.provider = "gemini"
+            else:
+                self.provider = "heuristic"
+
+        if self.provider == "gemini" and self.gemini_api_key and genai is not None:
+            self.client = genai.Client(api_key=self.gemini_api_key)
+            self.model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+        else:
+            self.provider = "heuristic"
         
         self.gscpi_min = 0.0
         self.gscpi_max = 3.0
-        self.trade_min = 0.0
-        self.trade_max = 10_000_000
-    
+
     def normalize_gscpi(self, gscpi_value: float) -> float:
         normalized = (gscpi_value - self.gscpi_min) / (self.gscpi_max - self.gscpi_min)
         return np.clip(normalized, 0.0, 1.0)
     
-    def normalize_trade(self, trade_volume: float) -> float:
-        normalized = (trade_volume - self.trade_min) / (self.trade_max - self.trade_min)
+    def normalize_trade(
+        self,
+        trade_volume: float,
+        trade_min: float,
+        trade_max: float,
+    ) -> float:
+        if trade_max <= trade_min:
+            return 0.5
+
+        normalized = (trade_volume - trade_min) / (trade_max - trade_min)
         normalized = np.clip(normalized, 0.0, 1.0)
         return 1.0 - normalized
     
-    def analyze_text_with_claude(self, nodes_data: List[ScraperData]) -> Dict[str, Dict[str, float]]:
+    def analyze_text_with_llm(self, nodes_data: List[ScraperData]) -> Dict[str, Dict[str, float]]:
+        if self.client is None or self.provider == "heuristic":
+            return self.analyze_text_heuristically(nodes_data)
+
         batch_context = self._build_batch_prompt(nodes_data)
         
         try:
-            message = self.client.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=4000,
-                temperature=0.3,
-                system=self._get_system_prompt(),
-                messages=[
-                    {
-                        "role": "user",
-                        "content": batch_context
-                    }
-                ]
-            )
+            if self.provider == "gemini":
+                response_text = self._analyze_with_gemini(batch_context)
+            else:
+                return self.analyze_text_heuristically(nodes_data)
 
-            response_text = message.content[0].text
-            risk_scores = self._parse_claude_response(response_text)
+            risk_scores = self._parse_llm_response(response_text)
             
-            return risk_scores
+            return risk_scores or self.analyze_text_heuristically(nodes_data)
             
         except Exception as e:
-            print(f"Error calling Claude API: {e}")
-            return {
-                node.node_id: {
-                    "news_risk": 0.5,
-                    "political_risk": 0.5,
-                    "weather_risk": 0.5
-                }
-                for node in nodes_data
+            print(f"Error calling {self.provider} API: {e}")
+            return self.analyze_text_heuristically(nodes_data)
+
+    def _analyze_with_gemini(self, batch_context: str) -> str:
+        response = self.client.models.generate_content(
+            model=self.model,
+            contents=batch_context,
+            config=genai_types.GenerateContentConfig(
+                system_instruction=self._get_system_prompt(),
+                temperature=0.3,
+                max_output_tokens=4000,
+                response_mime_type="application/json",
+                thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
+            ),
+        )
+        return response.text or ""
+
+    def analyze_text_heuristically(
+        self,
+        nodes_data: List[ScraperData],
+    ) -> Dict[str, Dict[str, float]]:
+        return {
+            node.node_id: {
+                "news_risk": self._score_text(
+                    node.news,
+                    high_risk_keywords={
+                        "delay": 0.08,
+                        "disruption": 0.16,
+                        "closure": 0.25,
+                        "congestion": 0.12,
+                        "strike": 0.22,
+                        "shortage": 0.15,
+                        "backlog": 0.12,
+                        "slowdown": 0.08,
+                    },
+                    low_risk_keywords={
+                        "normal": -0.12,
+                        "stable": -0.1,
+                        "record throughput": -0.1,
+                        "on schedule": -0.08,
+                        "smoothly": -0.08,
+                    },
+                ),
+                "political_risk": self._score_text(
+                    node.political,
+                    high_risk_keywords={
+                        "sanction": 0.22,
+                        "restriction": 0.18,
+                        "conflict": 0.22,
+                        "protest": 0.15,
+                        "strike": 0.14,
+                        "tariff": 0.12,
+                        "export control": 0.14,
+                        "instability": 0.18,
+                    },
+                    low_risk_keywords={
+                        "stable": -0.12,
+                        "facilitation": -0.08,
+                        "agreement": -0.08,
+                        "strong regulatory": -0.06,
+                    },
+                ),
+                "weather_risk": self._score_text(
+                    node.weather,
+                    high_risk_keywords={
+                        "typhoon": 0.3,
+                        "hurricane": 0.3,
+                        "storm": 0.18,
+                        "fog": 0.12,
+                        "flood": 0.18,
+                        "thunderstorm": 0.18,
+                        "heavy rain": 0.14,
+                        "warning": 0.16,
+                        "affected": 0.12,
+                    },
+                    low_risk_keywords={
+                        "clear": -0.12,
+                        "normal": -0.1,
+                        "no weather disruptions": -0.14,
+                        "partly cloudy": -0.04,
+                    },
+                ),
             }
+            for node in nodes_data
+        }
     
     def _get_system_prompt(self) -> str:
         return """You are an expert supply chain risk analyst. Your task is to analyze news, political, and weather information for various cities/ports and output risk scores.
@@ -124,7 +217,7 @@ Be concise and objective. Output ONLY the JSON, no explanation."""
         prompt += "\nProvide risk scores for all locations in JSON format."
         return prompt
     
-    def _parse_claude_response(self, response: str) -> Dict[str, Dict[str, float]]:
+    def _parse_llm_response(self, response: str) -> Dict[str, Dict[str, float]]:
         try:
             response = response.strip()
             if response.startswith("```json"):
@@ -141,6 +234,31 @@ Be concise and objective. Output ONLY the JSON, no explanation."""
             print(f"Error parsing Claude response: {e}")
             print(f"Response: {response}")
             return {}
+
+    def _score_text(
+        self,
+        text: str,
+        high_risk_keywords: Dict[str, float],
+        low_risk_keywords: Dict[str, float],
+    ) -> float:
+        if not text:
+            return 0.5
+
+        score = 0.5
+        lowered = text.lower()
+
+        for keyword, weight in high_risk_keywords.items():
+            if keyword in lowered:
+                score += weight
+
+        for keyword, weight in low_risk_keywords.items():
+            if keyword in lowered:
+                score += weight
+
+        if len(lowered) > 250:
+            score += 0.03
+
+        return float(np.clip(score, 0.0, 1.0))
     
     def apply_reporter_weights(self, 
                                base_risk: float, 
@@ -152,16 +270,20 @@ Be concise and objective. Output ONLY the JSON, no explanation."""
         print(f"Processing {len(nodes_data)} nodes")
         
         print("Step 1: Normalizing GSCPI and Trade data")
+        trade_values = [max(node.trade, 0.0) for node in nodes_data]
+        trade_min = min(trade_values) if trade_values else 0.0
+        trade_max = max(trade_values) if trade_values else 1.0
+
         gscpi_risks = {
             node.node_id: self.normalize_gscpi(node.gscpi)
             for node in nodes_data
         }
         trade_risks = {
-            node.node_id: self.normalize_trade(node.trade)
+            node.node_id: self.normalize_trade(node.trade, trade_min, trade_max)
             for node in nodes_data
         }
-        print("Step 2: Analyzing text data with Claude API")
-        claude_risks = self.analyze_text_with_claude(nodes_data)
+        print(f"Step 2: Analyzing text data with {self.provider} intelligence")
+        llm_risks = self.analyze_text_with_llm(nodes_data)
         
         print("Step 3: Applying Reporter credibility weights")
         risk_vectors = []
@@ -171,7 +293,7 @@ Be concise and objective. Output ONLY the JSON, no explanation."""
             gscpi_risk = gscpi_risks[node.node_id]
             trade_risk = trade_risks[node.node_id]
             
-            claude_risk = claude_risks.get(node.node_id, {
+            llm_risk = llm_risks.get(node.node_id, {
                 "news_risk": 0.5,
                 "political_risk": 0.5,
                 "weather_risk": 0.5
@@ -179,15 +301,15 @@ Be concise and objective. Output ONLY the JSON, no explanation."""
             reporter_confidence = np.mean(list(node.reporter_credibility.values()))
             
             news_risk = self.apply_reporter_weights(
-                claude_risk["news_risk"],
+                llm_risk["news_risk"],
                 node.reporter_credibility.get("news", 0.5)
             )
             political_risk = self.apply_reporter_weights(
-                claude_risk["political_risk"],
+                llm_risk["political_risk"],
                 node.reporter_credibility.get("political", 0.5)
             )
             weather_risk = self.apply_reporter_weights(
-                claude_risk["weather_risk"],
+                llm_risk["weather_risk"],
                 node.reporter_credibility.get("weather", 0.5)
             )
             
@@ -231,70 +353,4 @@ Be concise and objective. Output ONLY the JSON, no explanation."""
         print(f"Exported risk vectors to {filepath}")
 
 if __name__ == "__main__":
-    sample_data = [
-        ScraperData(
-            node_id="Hong_Kong",
-            gscpi=1.45,
-            trade=8500000,
-            news="Port workers in Hong Kong threaten strike over wages. Container terminals may face delays.",
-            political="Political tensions remain high. New regulations on shipping compliance introduced.",
-            weather="Typhoon Saola approaching. Category 4 storm expected to make landfall in 48 hours.",
-            reporter_credibility={"news": 0.85, "political": 0.75, "weather": 0.95}
-        ),
-        ScraperData(
-            node_id="Singapore",
-            gscpi=0.85,
-            trade=12000000,
-            news="Singapore port reports record throughput. Operations running smoothly.",
-            political="Stable political environment. Trade agreements with EU renewed.",
-            weather="Clear conditions. No weather disruptions expected.",
-            reporter_credibility={"news": 0.90, "political": 0.85, "weather": 0.90}
-        ),
-        ScraperData(
-            node_id="Shanghai",
-            gscpi=1.20,
-            trade=9500000,
-            news="COVID restrictions lifted at Shanghai port. Gradual return to normal operations.",
-            political="Government announces new export controls on technology goods.",
-            weather="Heavy fog affecting vessel movements. Delays of 4-6 hours reported.",
-            reporter_credibility={"news": 0.80, "political": 0.70, "weather": 0.85}
-        )
-    ]
-    print("Supply Chain Intelligence Processor\n")
-    if not os.getenv("ANTHROPIC_API_KEY"):
-        print("ANTHROPIC_API_KEY not set. Using mock mode.")
-        print("To run with real Claude API, set: export ANTHROPIC_API_KEY='your-key'\n")
-
-        processor = IntelligenceProcessor(api_key="mock-key")
-        processor.client = None
-        risk_vectors = []
-        for node in sample_data:
-            risk_vectors.append(RiskVector(
-                node_id=node.node_id,
-                gscpi_risk=processor.normalize_gscpi(node.gscpi),
-                news_risk=0.7 if "strike" in node.news.lower() else 0.3,
-                political_risk=0.6 if "tensions" in node.political.lower() else 0.3,
-                trade_risk=processor.normalize_trade(node.trade),
-                weather_risk=0.85 if "typhoon" in node.weather.lower() else 0.2,
-                reporter_confidence=0.85,
-                timestamp=datetime.utcnow().isoformat()
-            ))
-    else:
-        processor = IntelligenceProcessor()
-        risk_vectors = processor.process_batch(sample_data)
-    
-    print("\nRisk Vectors Generated\n")
-    for rv in risk_vectors:
-        print(f"{rv.node_id}:")
-        print(f"  GSCPI Risk:     {rv.gscpi_risk:.3f}")
-        print(f"  News Risk:      {rv.news_risk:.3f}")
-        print(f"  Political Risk: {rv.political_risk:.3f}")
-        print(f"  Trade Risk:     {rv.trade_risk:.3f}")
-        print(f"  Weather Risk:   {rv.weather_risk:.3f}")
-        print(f"  Reporter Conf:  {rv.reporter_confidence:.3f}")
-        overall = np.mean([rv.gscpi_risk, rv.news_risk, rv.political_risk, 
-                          rv.trade_risk, rv.weather_risk])
-        print(f"  Overall Risk:   {overall:.3f}")
-        print()
-    processor.export_to_json(risk_vectors, "risk_vectors_output.json")
-    print("\nIntelligence processing complete")
+    print("Run api_server.py to execute the live intelligence pipeline.")

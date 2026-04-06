@@ -1,12 +1,19 @@
 """
 LAMDA Base Scraper — Shared infrastructure for all scraper agents.
 
-Provides: SerpAPI client, Anthropic Claude wrapper, Flask app factory,
+Provides: SerpAPI client, Gemini wrapper, Flask app factory,
 in-memory TTL cache, node-to-city mapping, common endpoints, colorlog logging.
 """
 
 import os
-from dotenv import load_dotenv
+import pathlib
+import sys
+
+try:
+    from dotenv import load_dotenv
+except Exception:  # pragma: no cover - optional local convenience dependency
+    def load_dotenv():
+        return False
 
 # Load environment variables from .env file
 load_dotenv()
@@ -20,21 +27,24 @@ from typing import Dict, Optional, Any
 from flask import Flask, jsonify
 from flask_cors import CORS
 import requests as http_requests
-import colorlog
 
-# ---------------------------------------------------------------------------
-# Node reference
-# ---------------------------------------------------------------------------
-SUPPORTED_NODES = ["Hong_Kong", "Singapore", "Shanghai", "Tokyo", "Los_Angeles"]
+try:
+    import colorlog
+except Exception:  # pragma: no cover - logging can fall back to stdlib
+    colorlog = None
 
-NODE_CITY_MAP = {
-    "Hong_Kong": "Hong Kong",
-    "Singapore": "Singapore",
-    "Shanghai": "Shanghai",
-    "Tokyo": "Tokyo",
-    "Los_Angeles": "Los Angeles",
-}
+ROOT_DIR = pathlib.Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
+from node_metadata import NODE_CITY_MAP, SUPPORTED_NODES
+
+try:
+    from google import genai
+    from google.genai import types as genai_types
+except Exception:  # pragma: no cover - optional dependency at runtime
+    genai = None
+    genai_types = None
 
 class BaseScraper:
     """Base class for all LAMDA scraper agents."""
@@ -51,13 +61,13 @@ class BaseScraper:
         self.serpapi_key = os.environ.get("SERPAPI_API_KEY", "")
         self._serpapi_call_count = 0
 
-        # Anthropic
-        self.anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
-        self._anthropic_client = None
-        if self.anthropic_key:
+        # Gemini
+        self.gemini_key = os.environ.get("GEMINI_API_KEY", "")
+        self.gemini_model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+        self._gemini_client = None
+        if self.gemini_key and genai is not None:
             try:
-                import anthropic
-                self._anthropic_client = anthropic.Anthropic(api_key=self.anthropic_key)
+                self._gemini_client = genai.Client(api_key=self.gemini_key)
             except Exception:
                 pass
 
@@ -73,15 +83,30 @@ class BaseScraper:
     # Logging
     # ------------------------------------------------------------------
     def _setup_logging(self) -> logging.Logger:
-        handler = colorlog.StreamHandler()
-        handler.setFormatter(colorlog.ColoredFormatter(
-            "%(log_color)s%(asctime)s [%(name)s] %(levelname)s%(reset)s %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
-        ))
         logger = logging.getLogger(self.name)
         logger.setLevel(logging.INFO)
-        if not logger.handlers:
-            logger.addHandler(handler)
+        logger.propagate = False
+        if logger.handlers:
+            return logger
+
+        if colorlog is None:
+            handler = logging.StreamHandler()
+            handler.setFormatter(
+                logging.Formatter(
+                    "%(asctime)s [%(name)s] %(levelname)s %(message)s",
+                    datefmt="%Y-%m-%d %H:%M:%S",
+                )
+            )
+        else:
+            handler = colorlog.StreamHandler()
+            handler.setFormatter(
+                colorlog.ColoredFormatter(
+                    "%(log_color)s%(asctime)s [%(name)s] %(levelname)s%(reset)s %(message)s",
+                    datefmt="%Y-%m-%d %H:%M:%S",
+                )
+            )
+
+        logger.addHandler(handler)
         return logger
 
     # ------------------------------------------------------------------
@@ -136,30 +161,32 @@ class BaseScraper:
             return {}
 
     # ------------------------------------------------------------------
-    # Claude (Anthropic)
+    # Gemini
     # ------------------------------------------------------------------
-    def claude_analyze(self, prompt: str, system: str = None) -> str:
-        """Call Claude claude-sonnet-4-20250514 and return the text response."""
-        if not self._anthropic_client:
-            self.logger.warning("Anthropic client not available — returning empty")
+    def llm_analyze(self, prompt: str, system: str = None) -> str:
+        """Call Gemini and return the text response."""
+        if not self._gemini_client or genai_types is None:
+            self.logger.warning("Gemini client not available — returning empty")
             return ""
 
         try:
-            kwargs: Dict[str, Any] = {
-                "model": "claude-sonnet-4-20250514",
-                "max_tokens": 500,
-                "temperature": 0.2,
-                "messages": [{"role": "user", "content": prompt}],
-            }
+            config = genai_types.GenerateContentConfig(
+                temperature=0.2,
+                max_output_tokens=500,
+                thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
+            )
             if system:
-                kwargs["system"] = system
+                config.system_instruction = system
 
-            response = self._anthropic_client.messages.create(**kwargs)
-            text = response.content[0].text
-            return text
+            response = self._gemini_client.models.generate_content(
+                model=self.gemini_model,
+                contents=prompt,
+                config=config,
+            )
+            return response.text or ""
 
         except Exception as exc:
-            self.logger.error(f"Claude API error: {exc}")
+            self.logger.error(f"Gemini API error: {exc}")
             return ""
 
     # ------------------------------------------------------------------

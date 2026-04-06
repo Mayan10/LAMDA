@@ -180,8 +180,6 @@ class RouteOptimizer:
                           k: int = 3,
                           diversity_penalty: float = 0.3) -> List[Route]:
         routes = []
-        used_nodes_count = {node_id: 0 for node_id in self.nodes}
-        
         weight_configs = [
             {"risk": 1.0, "distance": 0.3, "trade": 0.2},
             {"risk": 0.5, "distance": 0.8, "trade": 0.2},
@@ -189,29 +187,111 @@ class RouteOptimizer:
             {"risk": 1.2, "distance": 0.2, "trade": 0.1},
             {"risk": 0.3, "distance": 1.0, "trade": 0.3},
         ]
-        
-        for i in range(min(k, len(weight_configs))):
-            route = self.find_optimal_route(source, destination, weight_configs[i])
-            
-            if route is None:
-                break
-            
+
+        candidate_paths = self._enumerate_simple_paths(source, destination)
+        unique_routes: Dict[tuple, Route] = {}
+
+        for weights in weight_configs:
+            for path in candidate_paths:
+                route = self._build_route_from_path(path, weights)
+                if route is None:
+                    continue
+
+                key = tuple(route.path)
+                existing = unique_routes.get(key)
+                if existing is None or route.route_score < existing.route_score:
+                    unique_routes[key] = route
+
+        for route in sorted(unique_routes.values(), key=lambda item: item.route_score):
             is_diverse = True
             for existing_route in routes:
                 overlap = len(set(route.path) & set(existing_route.path))
-                if overlap / len(route.path) > 0.7:
+                if overlap / len(route.path) > 0.8:
                     is_diverse = False
                     break
-            
+
             if is_diverse:
                 routes.append(route)
-                
-                for node in route.path:
-                    used_nodes_count[node] += 1
-        
-        routes.sort(key=lambda r: r.route_score)
-        
+
+            if len(routes) >= k:
+                break
+
         return routes[:k]
+
+    def _enumerate_simple_paths(
+        self,
+        source: str,
+        destination: str,
+        max_depth: Optional[int] = None,
+    ) -> List[List[str]]:
+        if source not in self.nodes or destination not in self.nodes:
+            return []
+
+        if max_depth is None:
+            max_depth = len(self.nodes) - 1
+
+        paths: List[List[str]] = []
+
+        def dfs(current: str, path: List[str], visited: set):
+            if len(path) - 1 > max_depth:
+                return
+
+            if current == destination:
+                paths.append(path[:])
+                return
+
+            for neighbor_info in sorted(
+                self.adjacency[current],
+                key=lambda item: item["distance_km"],
+            ):
+                neighbor = neighbor_info["target"]
+                if neighbor in visited:
+                    continue
+
+                visited.add(neighbor)
+                path.append(neighbor)
+                dfs(neighbor, path, visited)
+                path.pop()
+                visited.remove(neighbor)
+
+        dfs(source, [source], {source})
+        return paths
+
+    def _build_route_from_path(
+        self,
+        path: List[str],
+        weights: Dict[str, float],
+    ) -> Optional[Route]:
+        if len(path) < 2:
+            return None
+
+        total_distance = 0.0
+        total_cost = 0.0
+        total_risk = self.nodes[path[0]]["overall_risk"]
+
+        for source, target in zip(path, path[1:]):
+            edge_info = next(
+                (edge for edge in self.adjacency[source] if edge["target"] == target),
+                None,
+            )
+            if edge_info is None:
+                return None
+
+            total_distance += edge_info["distance_km"]
+            total_cost += self.calculate_edge_cost(source, target, edge_info, weights)
+            total_risk += self.nodes[target]["overall_risk"]
+
+        avg_risk = total_risk / len(path)
+        estimated_time = total_distance / 37.0
+
+        return Route(
+            path=path,
+            total_distance_km=total_distance,
+            total_risk=total_risk,
+            avg_risk=avg_risk,
+            estimated_time_hours=estimated_time,
+            route_score=total_cost,
+        )
     
     def analyze_route(self, route: Route) -> Dict:
         analysis = {
@@ -257,85 +337,4 @@ class RouteOptimizer:
         return analysis
 
 if __name__ == "__main__":
-    print("Route Optimizer\n")
-    
-    import os
-    if not os.path.exists("graph_state.json"):
-        print("graph_state.json not found. Run graph_risk_engine.py first.")
-        print("Creating sample graph for demo\n")
-        
-        sample_state = {
-            "timestamp": "2024-01-01T00:00:00",
-            "nodes": [
-                {"node_id": "Hong_Kong", "latitude": 22.3193, "longitude": 114.1694, 
-                 "overall_risk": 0.65, "risk_vector": [0.6, 0.7, 0.6, 0.5, 0.8, 0.85]},
-                {"node_id": "Singapore", "latitude": 1.3521, "longitude": 103.8198, 
-                 "overall_risk": 0.25, "risk_vector": [0.2, 0.3, 0.2, 0.3, 0.2, 0.90]},
-                {"node_id": "Shanghai", "latitude": 31.2304, "longitude": 121.4737, 
-                 "overall_risk": 0.45, "risk_vector": [0.4, 0.5, 0.4, 0.5, 0.4, 0.80]},
-                {"node_id": "Tokyo", "latitude": 35.6762, "longitude": 139.6503, 
-                 "overall_risk": 0.30, "risk_vector": [0.3, 0.3, 0.3, 0.3, 0.3, 0.85]},
-                {"node_id": "Los_Angeles", "latitude": 34.0522, "longitude": -118.2437, 
-                 "overall_risk": 0.35, "risk_vector": [0.3, 0.4, 0.3, 0.4, 0.3, 0.90]}
-            ],
-            "edges": [
-                {"source": "Hong_Kong", "target": "Singapore", "distance_km": 2590, "trade_volume": 5000000},
-                {"source": "Hong_Kong", "target": "Shanghai", "distance_km": 1213, "trade_volume": 8000000},
-                {"source": "Singapore", "target": "Shanghai", "distance_km": 3898, "trade_volume": 4000000},
-                {"source": "Shanghai", "target": "Tokyo", "distance_km": 1768, "trade_volume": 6000000},
-                {"source": "Tokyo", "target": "Los_Angeles", "distance_km": 8806, "trade_volume": 7000000},
-                {"source": "Singapore", "target": "Los_Angeles", "distance_km": 14100, "trade_volume": 3000000}
-            ]
-        }
-        
-        with open("graph_state.json", "w") as f:
-            json.dump(sample_state, f, indent=2)
-    
-    optimizer = RouteOptimizer("graph_state.json")
-    
-    print("Finding optimal routes: Hong Kong → Los Angeles")
-    
-    routes = optimizer.find_k_best_routes("Hong_Kong", "Los_Angeles", k=3)
-    
-    if not routes:
-        print("No routes found between these locations")
-    else:
-        for i, route in enumerate(routes, 1):
-            print(f"Route {i}:")
-            print(f"  Path: {' → '.join(route.path)}")
-            print(f"  Distance: {route.total_distance_km:.0f} km")
-            print(f"  Average Risk: {route.avg_risk:.3f}")
-            print(f"  Estimated Time: {route.estimated_time_hours/24:.1f} days")
-            print(f"  Route Score: {route.route_score:.2f}")
-            print()
-        
-        print("Detailed Analysis of Best Route")
-        
-        best_route = routes[0]
-        analysis = optimizer.analyze_route(best_route)
-        
-        print(json.dumps(analysis, indent=2))
-        
-        routes_export = {
-            "source": "Hong_Kong",
-            "destination": "Los_Angeles",
-            "num_routes": len(routes),
-            "routes": [
-                {
-                    "rank": i + 1,
-                    "path": route.path,
-                    "total_distance_km": route.total_distance_km,
-                    "avg_risk": route.avg_risk,
-                    "estimated_time_hours": route.estimated_time_hours,
-                    "route_score": route.route_score
-                }
-                for i, route in enumerate(routes)
-            ]
-        }
-        
-        with open("optimized_routes.json", "w") as f:
-            json.dump(routes_export, f, indent=2)
-        
-        print("\nRoutes exported to optimized_routes.json")
-    
-    print("\nRoute optimization complete!")
+    print("Run api_server.py and call /api/analyze_route to use live route optimization.")
