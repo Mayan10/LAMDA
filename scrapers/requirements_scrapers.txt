@@ -1,0 +1,8 @@
+flask==2.3.2
+flask-cors==4.0.0
+requests==2.31.0
+anthropic==0.23.1
+google-search-results==2.4.2
+colorlog==6.7.0
+python-dateutil==2.8.2
+pytz==2023.3

@@ -1,0 +1,1052 @@
+================================================================================
+                    LAMDA — Supply Chain Risk Prediction System
+                              Full Repository Context
+================================================================================
+
+Generated: 2026-03-05
+
+================================================================================
+1. PROJECT OVERVIEW
+================================================================================
+
+LAMDA is a production-ready Supply Chain Risk Prediction System that uses
+AI-powered intelligence processing, Graph Neural Networks (GNN) for spatial
+risk propagation, and multi-objective route optimization to assess and mitigate
+supply chain risks in real time.
+
+The system processes data from 6 different scraper sources, uses Claude AI
+(Anthropic) for semantic analysis of unstructured text, propagates risks
+through a Graph Attention Network (GAT), and finds optimal shipping routes
+using A* pathfinding with a multi-objective cost function.
+
+Target Users:
+  - Logistics companies needing real-time route risk assessment
+  - Supply chain managers monitoring global disruption risks
+  - Operations teams optimizing shipping routes across ports/cities
+
+Key Capabilities:
+  - AI-Powered Intelligence Processing (Claude API for news/political/weather)
+  - Graph Neural Network risk propagation (GAT with PyTorch Geometric)
+  - Temporal Memory (tracks risk history for trend analysis, last 10 updates)
+  - Multi-Objective Route Optimization (balances risk, distance, time, trade)
+  - REST API (Flask-based, easy integration with web/mobile frontends)
+  - Automated Updates (background worker updates graph every 30 minutes)
+  - Database Persistence (SQLite with risk history)
+
+
+================================================================================
+2. REPOSITORY STRUCTURE
+================================================================================
+
+e:\LAMDA\LAMDA\
+│
+├── .git/                          # Git version control directory
+├── .gitignore                     # Standard Python gitignore (207 lines)
+├── README.md                      # Full project documentation (704 lines)
+├── requirements.txt               # Python package dependencies (32 lines)
+│
+├── intelligence_processor.py      # Script 1: AI intelligence processing (300 lines)
+├── graph_risk_engine.py           # Script 2: GNN risk propagation engine (392 lines)
+├── route_optimizer.py             # Script 3: A* route optimization (341 lines)
+├── api_server.py                  # Script 4: Flask REST API server (462 lines)
+│
+└── scrapers/                      # 6 scraper microservices (live data layer)
+    ├── __init__.py                # Package init
+    ├── base_scraper.py            # Shared utilities: SerpAPI, Claude, Flask, cache
+    ├── gscpi_agent.py             # Port 8001 — Supply Chain Pressure Index proxy
+    ├── news_agent.py              # Port 8002 — Supply chain news summarization
+    ├── political_agent.py         # Port 8003 — Political risk assessment
+    ├── trade_agent.py             # Port 8004 — Trade volume estimation
+    ├── weather_agent.py           # Port 8005 — Weather & maritime alerts
+    ├── reporter_agent.py          # Port 8006 — Data source credibility scoring
+    ├── run_all.py                 # Launches all 6 scrapers as subprocesses
+    └── requirements_scrapers.txt  # Scraper-only dependencies (no ML libs)
+
+Total Python source: ~2,600+ lines across 12 files.
+
+
+================================================================================
+3. HIGH-LEVEL ARCHITECTURE & DATA FLOW
+================================================================================
+
+The system is structured as a 4-stage pipeline:
+
+┌─────────────────────────────────────────────────────────────┐
+│                    SCRAPER LAYER (6 scrapers)               │
+│  gscpi  │  news  │ political │ reporter │ trade │ weather  │
+└────────────────────────┬────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────────┐
+│         SCRIPT 1: intelligence_processor.py                 │
+│  • Normalizes numerical data (GSCPI, Trade)                 │
+│  • Claude API analyzes text (News, Political, Weather)      │
+│  • Applies Reporter credibility weights                     │
+│  • Outputs: 6D risk vectors per node                        │
+│  • Output file: risk_vectors_output.json                    │
+└────────────────────────┬────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────────┐
+│         SCRIPT 2: graph_risk_engine.py                      │
+│  • Graph Attention Network (GAT) for risk propagation       │
+│  • Considers neighbor influence & trade relationships       │
+│  • Temporal memory (stores last 10 snapshots in DB)         │
+│  • Outputs: Updated risk scores for all nodes               │
+│  • Output file: graph_state.json                            │
+│  • Database: supply_chain_graph.db (SQLite)                 │
+└────────────────────────┬────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────────┐
+│         SCRIPT 3: route_optimizer.py                        │
+│  • A* pathfinding with multi-objective cost function        │
+│  • Returns top-K alternative routes with diversity check    │
+│  • Detailed risk analysis per route                         │
+│  • Output file: optimized_routes.json                       │
+└────────────────────────┬────────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────────┐
+│         SCRIPT 4: api_server.py                             │
+│  • Flask REST API with 7 endpoints                          │
+│  • Background worker (updates every 30 min via APScheduler) │
+│  • Database for persistence                                 │
+│  • CORS enabled for frontend integration                    │
+└─────────────────────────────────────────────────────────────┘
+
+
+================================================================================
+4. FILE-BY-FILE DETAILED BREAKDOWN
+================================================================================
+
+--------------------------------------------------------------------------------
+4.1  intelligence_processor.py  (300 lines)
+     Purpose: Processes raw scraper data into 6-dimensional risk vectors
+--------------------------------------------------------------------------------
+
+IMPORTS:
+  json, os, typing (Dict, List, Any), dataclasses, anthropic (Anthropic),
+  numpy, datetime
+
+DATA CLASSES:
+
+  ScraperData (dataclass):
+    - node_id: str              — Unique identifier for a city/port
+    - gscpi: float              — Global Supply Chain Pressure Index value
+    - trade: float              — Trade volume in USD
+    - news: str                 — News text about the location
+    - political: str            — Political situation text
+    - weather: str              — Weather conditions text
+    - reporter_credibility: Dict[str, float]
+                                — Credibility scores per category (news, political, weather)
+
+  RiskVector (dataclass):
+    - node_id: str              — City/port identifier
+    - gscpi_risk: float         — Normalized GSCPI risk [0, 1]
+    - news_risk: float          — News-derived risk [0, 1]
+    - political_risk: float     — Political risk [0, 1]
+    - trade_risk: float         — Trade-derived risk [0, 1]
+    - weather_risk: float       — Weather-derived risk [0, 1]
+    - reporter_confidence: float — Reporter credibility weight [0, 1]
+    - timestamp: str            — ISO timestamp of processing
+
+CLASS: IntelligenceProcessor
+
+  __init__(self, api_key: str = None):
+    - Reads API key from parameter or ANTHROPIC_API_KEY env variable
+    - Initializes Anthropic client
+    - Sets normalization ranges:
+        gscpi_min=0.0, gscpi_max=3.0
+        trade_min=0.0, trade_max=10,000,000
+
+  normalize_gscpi(self, gscpi_value: float) -> float:
+    - Linear normalization: (value - min) / (max - min)
+    - Clipped to [0.0, 1.0]
+    - Higher GSCPI = higher risk
+
+  normalize_trade(self, trade_volume: float) -> float:
+    - Linear normalization, then INVERTED (1.0 - normalized)
+    - Higher trade volume = LOWER risk (inverse relationship)
+    - Clipped to [0.0, 1.0]
+
+  analyze_text_with_claude(self, nodes_data: List[ScraperData]) -> Dict:
+    - Builds a batch prompt with all nodes' text data
+    - Calls Claude API (claude-sonnet-4-20250514, max_tokens=4000, temperature=0.3)
+    - Uses system prompt defining risk analysis rules
+    - Parses JSON response into per-node risk scores
+    - On error, returns 0.5 (medium) defaults for all nodes
+    - Returns: {node_id: {news_risk, political_risk, weather_risk}}
+
+  _get_system_prompt(self) -> str:
+    - Defines Claude's role as "expert supply chain risk analyst"
+    - Instructs analysis of NEWS, POLITICAL, and WEATHER categories
+    - Risk scale: 0.0-0.3 (Low), 0.3-0.6 (Moderate), 0.6-0.8 (High), 0.8-1.0 (Severe)
+    - Output format: JSON only, no explanations
+
+  _build_batch_prompt(self, nodes_data: List[ScraperData]) -> str:
+    - Concatenates all nodes' text data into one prompt
+    - Truncates: news to 500 chars, political to 500 chars, weather to 300 chars
+    - One Claude API call for all nodes (efficiency)
+
+  _parse_claude_response(self, response: str) -> Dict:
+    - Strips markdown code fences (```json, ```)
+    - Parses JSON
+    - On parse failure, returns empty dict
+
+  apply_reporter_weights(self, base_risk: float, credibility: float) -> float:
+    - Formula: adjusted_risk = base_risk * credibility + 0.5 * (1 - credibility)
+    - When credibility is high, trust the base_risk more
+    - When credibility is low, pull risk toward 0.5 (uncertain)
+    - Clipped to [0.0, 1.0]
+
+  process_batch(self, nodes_data: List[ScraperData]) -> List[RiskVector]:
+    - Step 1: Normalize GSCPI and Trade numerical data
+    - Step 2: Call Claude API for text analysis (news, political, weather)
+    - Step 3: Apply reporter credibility weights to each risk dimension
+    - Produces a 6D RiskVector per node: [gscpi, news, political, trade, weather, reporter_confidence]
+
+  export_to_json(self, risk_vectors: List[RiskVector], filepath: str):
+    - Writes JSON with timestamp, num_nodes, and array of risk vector dicts
+    - Output file: risk_vectors_output.json
+
+MAIN BLOCK (if __name__ == "__main__"):
+  - Provides 3 sample nodes: Hong_Kong, Singapore, Shanghai
+  - If ANTHROPIC_API_KEY not set → mock mode with heuristic rules
+  - If ANTHROPIC_API_KEY set → full Claude API processing
+  - Prints all risk vectors and exports to risk_vectors_output.json
+
+
+--------------------------------------------------------------------------------
+4.2  graph_risk_engine.py  (392 lines)
+     Purpose: GNN-based risk propagation across the supply chain graph
+--------------------------------------------------------------------------------
+
+IMPORTS:
+  json, numpy, torch, torch.nn, torch.nn.functional, torch_geometric (GATConv, Data),
+  sqlite3, datetime, typing, dataclasses
+
+DATA CLASSES:
+
+  GraphNode (dataclass):
+    - node_id: str
+    - latitude: float
+    - longitude: float
+    - risk_vector: np.ndarray      — 6D risk vector from intelligence processor
+
+  GraphEdge (dataclass):
+    - source: str
+    - target: str
+    - distance_km: float
+    - trade_volume: float
+
+CLASS: GraphAttentionRiskModel (nn.Module)
+  Neural network model for risk propagation.
+
+  __init__(self, input_dim=6, hidden_dim=16, output_dim=6, num_heads=4):
+    - Layer 1 (GAT): GATConv(6 → 16, 4 heads, dropout=0.2, concat=True)
+      Output: 16 * 4 = 64 features
+    - Layer 2 (GAT): GATConv(64 → 6, 1 head, dropout=0.2, concat=False)
+      Output: 6 features (same as input dimension)
+    - temporal_decay: learnable parameter initialized to 0.9
+
+  forward(self, x, edge_index, edge_attr=None):
+    - x → GAT1 → ELU activation → Dropout(0.2) → GAT2 → Sigmoid
+    - Output: tensor of shape [num_nodes, 6], values in [0, 1]
+
+CLASS: GraphRiskEngine
+  Manages the supply chain graph, runs GNN inference, stores results.
+
+  __init__(self, db_path="supply_chain_graph.db"):
+    - Initializes GraphAttentionRiskModel
+    - Adam optimizer (lr=0.001)
+    - Empty nodes dict and edges list
+    - history_length = 10 (temporal memory depth)
+    - Calls _init_database()
+
+  _init_database(self):
+    - Creates SQLite tables:
+        nodes: (node_id TEXT PK, latitude, longitude, current_risk, last_updated)
+        edges: (edge_id INTEGER PK AUTO, source, target, distance_km, trade_volume, UNIQUE(source,target))
+        risk_history: (id PK AUTO, node_id FK, timestamp, gscpi/news/political/trade/weather_risk,
+                       reporter_confidence, overall_risk)
+    - Creates index: idx_history_node_time on (node_id, timestamp DESC)
+
+  load_graph_structure(self, nodes_file, edges_file):
+    - Reads graph_nodes.json → populates self.nodes dict
+    - Reads graph_edges.json → populates self.edges list
+    - Initializes all risk vectors to zeros(6)
+
+  update_risk_vectors(self, risk_vectors_file):
+    - Reads risk_vectors_output.json
+    - Updates each node's risk_vector array with 6 values:
+      [gscpi_risk, news_risk, political_risk, trade_risk, weather_risk, reporter_confidence]
+
+  _build_pytorch_geometric_data(self) -> (Data, node_ids):
+    - Converts internal graph to PyTorch Geometric Data object
+    - Creates node feature matrix from risk vectors
+    - Builds edge_index (bidirectional — adds both directions)
+    - Edge weights: 1.0 / (1.0 + distance_km / 1000.0)
+      (closer nodes have higher weight/influence)
+
+  propagate_risks(self) -> Dict[str, np.ndarray]:
+    - Builds PyG data, runs model in eval/no_grad mode
+    - Updates all node risk vectors with GNN output
+    - Returns dict of {node_id: updated_risk_vector}
+
+  store_snapshot(self, timestamp=None):
+    - Computes overall_risk = mean of first 5 risk dimensions (excludes reporter_confidence)
+    - INSERT OR REPLACE into nodes table
+    - INSERT into risk_history table
+    - Prunes old history beyond history_length (10 records per node)
+
+  get_node_risk_score(self, node_id) -> float:
+    - Returns mean of first 5 risk dimensions
+    - Default 0.5 if node not found
+
+  export_graph_state(self, output_file):
+    - Writes graph_state.json with:
+      timestamp, nodes (with risk_vector and overall_risk), edges
+
+  get_historical_trends(self, node_id, limit=10) -> List[Dict]:
+    - Queries risk_history table ordered by timestamp DESC
+    - Returns list of dicts with all risk dimensions
+
+MAIN BLOCK:
+  - Creates sample 5-node graph (Hong_Kong, Singapore, Shanghai, Tokyo, Los_Angeles)
+  - Creates sample 5 edges
+  - Writes graph_nodes.json and graph_edges.json
+  - Loads risk vectors from intelligence processor or uses random values
+  - Runs risk propagation, stores snapshot, exports graph state
+
+
+--------------------------------------------------------------------------------
+4.3  route_optimizer.py  (341 lines)
+     Purpose: A* pathfinding with multi-objective cost optimization
+--------------------------------------------------------------------------------
+
+IMPORTS:
+  json, heapq, numpy, typing, dataclasses, math (radians, cos, sin, asin, sqrt)
+
+DATA CLASSES:
+
+  Route (dataclass):
+    - path: List[str]             — Ordered list of node IDs
+    - total_distance_km: float
+    - total_risk: float           — Sum of node risks along path
+    - avg_risk: float             — total_risk / number of nodes
+    - estimated_time_hours: float — Based on 37 km/h average ship speed
+    - route_score: float          — A* g_score (lower is better)
+
+CLASS: RouteOptimizer
+
+  __init__(self, graph_state_file):
+    - Reads graph_state.json
+    - Builds nodes dict: {node_id: {latitude, longitude, overall_risk}}
+    - Builds bidirectional adjacency list: {node_id: [{target, distance_km, trade_volume}]}
+
+  haversine_distance(self, lat1, lon1, lat2, lon2) -> float:
+    - Computes great-circle distance in km
+    - Uses Earth radius = 6371 km
+
+  calculate_heuristic(self, current, goal) -> float:
+    - A* heuristic: haversine_distance * (1 + avg_risk)
+    - Risk-aware heuristic — penalizes risky areas
+
+  calculate_edge_cost(self, source, target, edge_info, weights) -> float:
+    - Multi-objective cost function with 3 components:
+      1. distance_cost = distance * weights["distance"]
+      2. risk_cost = avg_risk * distance * weights["risk"]
+      3. trade_cost = distance * trade_factor * weights["trade"]
+         where trade_factor = 1.0 / (1.0 + trade_volume / 1,000,000)
+    - total_cost = distance_cost + risk_cost + trade_cost
+
+  find_optimal_route(self, source, destination, weights=None) -> Optional[Route]:
+    - A* search algorithm
+    - Default weights: risk=1.0, distance=0.3, trade=0.2
+    - Tracks g_score, f_score, came_from, distance_to, risk_to
+    - Estimates time: total_distance / 37.0 km/h (average vessel speed)
+    - Returns Route object or None if no path exists
+
+  find_k_best_routes(self, source, destination, k=3, diversity_penalty=0.3) -> List[Route]:
+    - Runs A* with multiple weight configurations:
+      Config 1: risk=1.0, distance=0.3, trade=0.2 (risk-heavy)
+      Config 2: risk=0.5, distance=0.8, trade=0.2 (distance-heavy)
+      Config 3: risk=0.7, distance=0.4, trade=0.5 (balanced with trade)
+      Config 4: risk=1.2, distance=0.2, trade=0.1 (very risk-averse)
+      Config 5: risk=0.3, distance=1.0, trade=0.3 (shortest path)
+    - Diversity check: rejects routes with >70% node overlap with existing routes
+    - Returns sorted by route_score (ascending, best first)
+
+  analyze_route(self, route: Route) -> Dict:
+    - Produces detailed analysis:
+      route_summary: path string, distance, avg_risk, estimated days, score
+      node_risks: list of {node, risk} for each node
+      high_risk_segments: nodes with overall_risk > 0.7
+      bottlenecks: intermediate nodes with ≤2 route alternatives
+
+MAIN BLOCK:
+  - Creates sample graph if graph_state.json missing
+  - Finds top-3 routes from Hong_Kong to Los_Angeles
+  - Prints route details and analysis
+  - Exports to optimized_routes.json
+
+
+--------------------------------------------------------------------------------
+4.4  api_server.py  (462 lines)
+     Purpose: Flask REST API server orchestrating the entire pipeline
+--------------------------------------------------------------------------------
+
+IMPORTS:
+  flask (Flask, request, jsonify), flask_cors (CORS),
+  apscheduler.schedulers.background (BackgroundScheduler),
+  datetime, json, os, logging, typing,
+  intelligence_processor (IntelligenceProcessor, ScraperData),
+  graph_risk_engine (GraphRiskEngine),
+  route_optimizer (RouteOptimizer)
+
+GLOBALS:
+  app = Flask instance with CORS enabled
+  intelligence_processor = None (initialized at startup)
+  graph_engine = None (initialized at startup)
+  route_optimizer = None (initialized at startup)
+  logger = Python logging with INFO level
+
+CONFIG:
+  UPDATE_INTERVAL_MINUTES: 30
+  GRAPH_STATE_FILE: "graph_state.json"
+  RISK_VECTORS_FILE: "risk_vectors_output.json"
+  DB_PATH: "supply_chain_graph.db"
+  GRAPH_NODES_FILE: "graph_nodes.json"
+  GRAPH_EDGES_FILE: "graph_edges.json"
+
+FUNCTIONS:
+
+  fetch_scraper_data() -> List[ScraperData]:
+    - Currently returns MOCK data for demo (2 nodes: Hong_Kong, Singapore)
+    - Has commented-out production template showing expected scraper endpoints:
+        GSCPI:     GET http://gscpi-scraper:8001/api/latest/{node_id}
+        News:      GET http://news-scraper:8002/api/latest/{node_id}
+        Political: GET http://political-scraper:8003/api/latest/{node_id}
+        Trade:     GET http://trade-scraper:8004/api/latest/{node_id}
+        Weather:   GET http://weather-scraper:8005/api/latest/{node_id}
+        Reporter:  GET http://reporter-service:8006/api/credibility/{node_id}
+
+  update_graph_pipeline():
+    - Step 1: Fetch scraper data → process through IntelligenceProcessor → export risk_vectors_output.json
+    - Step 2: Update GraphRiskEngine → propagate risks → store snapshot → export graph_state.json
+    - Step 3: Reload RouteOptimizer with new graph state
+    - Called by scheduler every 30 minutes and on manual trigger
+
+  initialize_system() -> bool:
+    - Creates IntelligenceProcessor (requires ANTHROPIC_API_KEY)
+    - Creates GraphRiskEngine with SQLite DB
+    - Loads graph structure from graph_nodes.json & graph_edges.json
+    - If no graph_state.json exists, runs initial update pipeline
+    - Creates RouteOptimizer
+    - Returns True on success, False on failure
+
+  setup_scheduler() -> BackgroundScheduler:
+    - Schedules update_graph_pipeline every CONFIG["UPDATE_INTERVAL_MINUTES"] minutes
+    - Uses APScheduler with interval trigger
+
+API ENDPOINTS (7 total):
+
+  1. GET /
+     - Returns API info, endpoints list, status
+
+  2. GET /favicon.ico
+     - Returns 204 No Content (prevents browser 404)
+
+  3. GET /api/health
+     - Returns health status and service availability booleans
+
+  4. POST /api/analyze_route
+     - Request body: {source, destination, num_routes (optional, default 3)}
+     - Calls RouteOptimizer.find_k_best_routes()
+     - Returns ranked routes with distances, risks, times, scores, detailed analysis
+     - 400 if missing source/destination
+     - 404 if no routes found
+
+  5. GET /api/node_status/<node_id>
+     - Returns full risk breakdown for a node
+     - Includes: 6 risk dimensions, overall_risk, risk_level (LOW/MODERATE/HIGH/SEVERE)
+     - Risk thresholds: <0.3 LOW, <0.6 MODERATE, <0.8 HIGH, ≥0.8 SEVERE
+     - 404 if node not found
+
+  6. GET /api/graph_snapshot
+     - Returns full graph state from graph_state.json
+     - Includes computed statistics: avg_risk, high/moderate/low risk node counts
+
+  7. GET /api/historical_trends/<node_id>?limit=10
+     - Returns historical risk records from SQLite
+     - Default limit: 10 records
+     - 404 if no history found
+
+  8. POST /api/update_graph
+     - Admin endpoint to manually trigger full pipeline update
+     - Returns success/error status
+
+  9. GET /api/available_nodes
+     - Returns list of all nodes with coordinates and overall risk
+
+MAIN BLOCK:
+  - Calls initialize_system()
+  - Sets up background scheduler
+  - Starts Flask server on 0.0.0.0:5001
+  - Graceful shutdown on KeyboardInterrupt
+
+
+================================================================================
+5. DATA FLOW & INTERMEDIATE FILES
+================================================================================
+
+Input Files (user-provided):
+  - graph_nodes.json     — Node definitions: [{node_id, latitude, longitude}]
+  - graph_edges.json     — Edge definitions: [{source, target, distance_km, trade_volume}]
+
+Generated Files:
+  - risk_vectors_output.json — Output of intelligence_processor.py
+      Format: {timestamp, num_nodes, risk_vectors: [{node_id, gscpi_risk, news_risk,
+               political_risk, trade_risk, weather_risk, reporter_confidence}]}
+
+  - graph_state.json — Output of graph_risk_engine.py
+      Format: {timestamp, nodes: [{node_id, latitude, longitude, risk_vector, overall_risk}],
+               edges: [{source, target, distance_km, trade_volume}]}
+
+  - optimized_routes.json — Output of route_optimizer.py (standalone mode)
+      Format: {source, destination, num_routes, routes: [{rank, path, total_distance_km,
+               avg_risk, estimated_time_hours, route_score}]}
+
+  - supply_chain_graph.db — SQLite database (persistent storage)
+
+
+================================================================================
+6. DATABASE SCHEMA (SQLite: supply_chain_graph.db)
+================================================================================
+
+TABLE: nodes
+  node_id TEXT         PRIMARY KEY
+  latitude REAL
+  longitude REAL
+  current_risk REAL    — Mean of 5 risk dimensions
+  last_updated TEXT    — ISO timestamp
+
+TABLE: edges
+  edge_id INTEGER      PRIMARY KEY AUTOINCREMENT
+  source TEXT
+  target TEXT
+  distance_km REAL
+  trade_volume REAL
+  UNIQUE(source, target)
+
+TABLE: risk_history
+  id INTEGER           PRIMARY KEY AUTOINCREMENT
+  node_id TEXT         — FK → nodes.node_id
+  timestamp TEXT       — ISO timestamp
+  gscpi_risk REAL
+  news_risk REAL
+  political_risk REAL
+  trade_risk REAL
+  weather_risk REAL
+  reporter_confidence REAL
+  overall_risk REAL
+
+INDEX: idx_history_node_time ON risk_history(node_id, timestamp DESC)
+
+
+================================================================================
+7. RISK VECTOR STRUCTURE (6 DIMENSIONS)
+================================================================================
+
+Each node carries a 6-dimensional risk vector:
+
+  Index 0: gscpi_risk          — Global Supply Chain Pressure Index (normalized 0-1)
+  Index 1: news_risk           — News-derived risk (Claude AI + reporter weight)
+  Index 2: political_risk      — Political risk (Claude AI + reporter weight)
+  Index 3: trade_risk          — Trade volume risk (inverse — high trade = low risk)
+  Index 4: weather_risk        — Weather risk (Claude AI + reporter weight)
+  Index 5: reporter_confidence — Mean credibility across all reporter categories
+
+Overall Risk = mean(index 0..4), excluding reporter_confidence.
+
+Risk Level Classification:
+  0.0 – 0.3  →  LOW        (normal operations)
+  0.3 – 0.6  →  MODERATE   (minor delays possible)
+  0.6 – 0.8  →  HIGH       (significant disruptions likely)
+  0.8 – 1.0  →  SEVERE     (avoid if possible)
+
+
+================================================================================
+8. KEY ALGORITHMS
+================================================================================
+
+8.1  Risk Normalization (Intelligence Processor)
+     - GSCPI: Linear normalization with min=0, max=3
+     - Trade: Linear normalization (inverted) with min=0, max=10M
+     - Text (news/political/weather): Claude AI scoring with reporter credibility weighting
+     - Reporter Weight Formula: adjusted = base_risk * credibility + 0.5 * (1 - credibility)
+
+8.2  Graph Attention Network (Graph Risk Engine)
+     - 2-layer GAT with multi-head attention
+     - Layer 1: 4 heads, 16 hidden dim per head, concatenated → 64 features
+     - Layer 2: 1 head, output dim 6, sigmoid activation
+     - Edge weights based on inverse distance: 1 / (1 + distance_km / 1000)
+     - Bidirectional edges (both directions added)
+
+8.3  A* Pathfinding (Route Optimizer)
+     - Heuristic: haversine_distance * (1 + avg_risk) — risk-aware
+     - Multi-objective cost: distance_cost + risk_cost + trade_cost
+     - K-best routes via multiple weight configurations
+     - Diversity filtering: reject routes with >70% node overlap
+     - Ship speed assumption: 37 km/h
+
+
+================================================================================
+9. DEPENDENCIES (requirements.txt)
+================================================================================
+
+Core Scientific:
+  numpy==1.24.3
+  scipy==1.10.1
+  pandas==2.0.3
+
+AI / LLM:
+  anthropic==0.23.1            — Claude API client
+
+Deep Learning:
+  torch==2.0.1
+  torchvision==0.15.2
+  torchaudio==2.0.2
+  torch-geometric==2.3.1       — Graph neural network library
+  torch-scatter==2.1.1
+  torch-sparse==0.6.17
+
+Web Framework:
+  Flask==2.3.2
+  Flask-CORS==4.0.0
+  Werkzeug==2.3.6
+
+Scheduling:
+  APScheduler==3.10.1
+
+HTTP:
+  requests==2.31.0
+
+Database:
+  sqlite3 (built-in)
+
+Utilities:
+  python-dateutil==2.8.2
+  pytz==2023.3
+  colorlog==6.7.0
+
+Dev/Testing:
+  pytest==7.4.0
+  black==23.3.0
+  flake8==6.0.0
+
+
+================================================================================
+10. ENVIRONMENT VARIABLES
+================================================================================
+
+  ANTHROPIC_API_KEY   — Required. Anthropic API key for Claude AI.
+                        Set via: export ANTHROPIC_API_KEY='your-key'
+                        (Windows: set ANTHROPIC_API_KEY=your-key)
+
+  PORT                — Optional. Override default API port (5001).
+                        Set via: PORT=8080 python api_server.py
+
+
+================================================================================
+11. API ENDPOINTS SUMMARY
+================================================================================
+
+  Method  Endpoint                                 Description
+  ------  ---------------------------------------- ---------------------------------
+  GET     /                                        API info and available endpoints
+  GET     /api/health                              Health check / service status
+  POST    /api/analyze_route                       Find optimal routes (source → dest)
+  GET     /api/node_status/<node_id>               Risk status of a specific node
+  GET     /api/graph_snapshot                       Full graph state with statistics
+  GET     /api/historical_trends/<node_id>?limit=N Historical risk data for a node
+  GET     /api/available_nodes                      List all nodes with coordinates
+  POST    /api/update_graph                         Manually trigger graph update
+
+
+================================================================================
+12. HOW TO RUN
+================================================================================
+
+  Prerequisites:
+    - Python 3.8+
+    - ANTHROPIC_API_KEY environment variable set
+
+  Setup:
+    1. python -m venv venv
+    2. venv\Scripts\activate  (Windows) or source venv/bin/activate (Linux/Mac)
+    3. pip install -r requirements.txt
+
+  Individual Scripts:
+    python intelligence_processor.py    → Generates risk_vectors_output.json
+    python graph_risk_engine.py         → Generates graph_state.json, supply_chain_graph.db
+    python route_optimizer.py           → Generates optimized_routes.json
+
+  Full System:
+    python api_server.py                → Starts API on http://localhost:5001
+
+  Testing:
+    curl http://localhost:5001/api/health
+    curl http://localhost:5001/api/available_nodes
+    curl -X POST http://localhost:5001/api/analyze_route \
+      -H "Content-Type: application/json" \
+      -d '{"source": "Hong_Kong", "destination": "Los_Angeles", "num_routes": 3}'
+
+
+================================================================================
+13. SAMPLE DATA (BUILT-IN)
+================================================================================
+
+The system includes sample data for demonstration:
+
+  5 Nodes: Hong_Kong, Singapore, Shanghai, Tokyo, Los_Angeles
+  5 Edges (with distances and trade volumes):
+    Hong_Kong ↔ Singapore:   2,590 km, trade_volume: 5,000,000
+    Hong_Kong ↔ Shanghai:    1,213 km, trade_volume: 8,000,000
+    Singapore ↔ Shanghai:    3,898 km, trade_volume: 4,000,000
+    Shanghai  ↔ Tokyo:       1,768 km, trade_volume: 6,000,000
+    Tokyo     ↔ Los_Angeles: 8,806 km, trade_volume: 7,000,000
+
+  Mock Scraper Data (2 nodes in api_server.py, 3 nodes in intelligence_processor.py)
+
+
+================================================================================
+14. PERFORMANCE NOTES
+================================================================================
+
+  - 100 nodes:   ~2 seconds per update
+  - 1,000 nodes: ~20 seconds per update
+  - 10,000+ nodes: Consider distributed architecture
+
+  Scaling Recommendations:
+    - Redis for caching
+    - Multiple API instances with load balancer
+    - Neo4j instead of SQLite
+    - GPU servers for GNN inference
+
+
+================================================================================
+15. ROADMAP (FROM README)
+================================================================================
+
+  [x] Live scraper microservices (6 agents — GSCPI, News, Political, Trade, Weather, Reporter)
+  [ ] GPU acceleration for GNN
+  [ ] Real-time alerts system
+  [ ] Dashboard UI
+  [ ] Mobile app integration
+  [ ] Multi-modal transport (air, rail, sea)
+  [ ] Carbon footprint optimization
+
+
+================================================================================
+16. SCRAPER MICROSERVICES LAYER (scrapers/ directory)
+================================================================================
+
+The scrapers/ directory contains 6 standalone Flask microservices that replace
+the mock data in api_server.py with real, live data from the internet.
+
+Pipeline position:
+  [6 Scraper Microservices] → api_server.py → intelligence_processor.py
+                            → graph_risk_engine.py → route_optimizer.py
+
+Each scraper runs on its own port and is independently deployable.
+They share a common base class (BaseScraper) for SerpAPI, Claude AI,
+Flask setup, caching, and logging.
+
+
+--------------------------------------------------------------------------------
+16.1  base_scraper.py  (Shared Infrastructure)
+     Purpose: Base class inherited by all 6 scraper agents.
+--------------------------------------------------------------------------------
+
+CLASS: BaseScraper
+
+  __init__(self, name: str, port: int, cache_ttl_seconds: int = 1800):
+    - Reads SERPAPI_API_KEY and ANTHROPIC_API_KEY from environment
+    - Initializes Anthropic client (if key available)
+    - Sets up in-memory TTL cache (Dict[str, {"data", "expires_at"}])
+    - Creates Flask app with CORS
+    - Registers common routes: /health, /api/nodes, /api/cache/clear
+    - Sets up colorlog logging
+
+  serpapi_search(self, query: str, search_type: str = "search") -> dict:
+    - Wrapper around SerpAPI GoogleSearch
+    - search_type "news" adds tbm="nws" param
+    - Tracks call count for monitoring
+    - Returns parsed results or {} on error
+
+  claude_analyze(self, prompt: str, system: str = None) -> str:
+    - Calls Claude claude-sonnet-4-20250514 (max_tokens=500, temperature=0.2)
+    - Returns text response or "" on error
+
+  get_cached(self, node_id: str) -> Optional[dict]:
+    - Returns cached data if not expired, else None
+
+  set_cached(self, node_id: str, data: dict):
+    - Stores data with TTL expiry
+
+  node_to_city(self, node_id: str) -> str:
+    - Maps "Hong_Kong" → "Hong Kong", "Los_Angeles" → "Los Angeles"
+
+  utc_timestamp() -> str:  (static)
+    - Returns datetime.utcnow().isoformat() + "Z"
+
+  parse_json_from_text(self, text: str) -> dict:
+    - Strips markdown code fences, parses JSON
+    - Returns {} on parse failure
+
+  run(self):
+    - Starts Flask on 0.0.0.0:{port} with threaded=True
+
+CONSTANTS:
+  SUPPORTED_NODES = ["Hong_Kong", "Singapore", "Shanghai", "Tokyo", "Los_Angeles"]
+  NODE_CITY_MAP = {"Hong_Kong": "Hong Kong", ...}
+
+COMMON ENDPOINTS (all scrapers):
+  GET /health          → {"status": "ok", "scraper": "<name>", "port": <port>}
+  GET /api/nodes       → {"nodes": ["Hong_Kong", "Singapore", ...]}
+  GET /api/cache/clear → {"cleared": true}
+
+
+--------------------------------------------------------------------------------
+16.2  gscpi_agent.py  (Port 8001)
+     Purpose: Estimates per-node Global Supply Chain Pressure Index proxy.
+--------------------------------------------------------------------------------
+
+CLASS: GSCPIAgent(BaseScraper)
+
+  Cache TTL: 30 minutes
+  Fallback value: 1.0 (moderate pressure)
+
+  Endpoint: GET /api/latest/{node_id}
+  Response: {"node_id": "...", "value": <float 0.0-3.0>, "timestamp": "..."}
+
+  Algorithm:
+    1. SerpAPI search: "{city} port supply chain pressure {month} {year}"
+    2. SerpAPI search: "{city} shipping delays freight rates {year}"
+    3. Claude synthesizes search results → numeric value in [0.0, 3.0]
+    4. Fallback: returns 1.0 if SerpAPI/Claude fail
+
+
+--------------------------------------------------------------------------------
+16.3  news_agent.py  (Port 8002)
+     Purpose: Fetches supply-chain-relevant news summaries per port.
+--------------------------------------------------------------------------------
+
+CLASS: NewsAgent(BaseScraper)
+
+  Cache TTL: 15 minutes
+
+  Endpoint: GET /api/latest/{node_id}
+  Response: {"node_id": "...", "summary": "<max 500 chars>",
+             "sources": ["url1", ...], "timestamp": "..."}
+
+  Algorithm:
+    1. SerpAPI news search: "{city} port shipping supply chain news"
+    2. SerpAPI news search: "{city} logistics disruption strike protest"
+    3. Collect top results (title + snippet + link)
+    4. Claude summarizes → max 500 chars + source URLs
+    5. Fallback: generic "no disruptions" message
+
+
+--------------------------------------------------------------------------------
+16.4  political_agent.py  (Port 8003)
+     Purpose: Fetches political risk info relevant to trade/shipping.
+--------------------------------------------------------------------------------
+
+CLASS: PoliticalAgent(BaseScraper)
+
+  Cache TTL: 30 minutes
+
+  Endpoint: GET /api/latest/{node_id}
+  Response: {"node_id": "...", "report": "<max 500 chars>", "timestamp": "..."}
+
+  Algorithm:
+    1. SerpAPI search: "{city} trade sanctions port restrictions political {year}"
+    2. SerpAPI search: "{city} protests strikes port workers {month} {year}"
+    3. Claude synthesizes → max 500 char report
+    4. Fallback: "no active sanctions or restrictions" message
+
+
+--------------------------------------------------------------------------------
+16.5  trade_agent.py  (Port 8004)
+     Purpose: Estimates weekly trade volume (USD) per port.
+--------------------------------------------------------------------------------
+
+CLASS: TradeAgent(BaseScraper)
+
+  Cache TTL: 60 minutes
+
+  Endpoint: GET /api/latest/{node_id}
+  Response: {"node_id": "...", "volume_usd": <float>, "period": "weekly",
+             "timestamp": "..."}
+
+  Hardcoded Baseline Volumes (USD, weekly):
+    Hong_Kong: 6,500,000   Singapore: 7,200,000   Shanghai: 9,100,000
+    Tokyo: 5,800,000       Los_Angeles: 6,000,000
+
+  Algorithm (3-tier fallback):
+    1. UN Comtrade public API (with exponential backoff retries)
+    2. SerpAPI + Claude estimation (adjusts from baseline)
+    3. Hardcoded baseline as ultimate fallback
+
+
+--------------------------------------------------------------------------------
+16.6  weather_agent.py  (Port 8005)
+     Purpose: Current weather and maritime alerts per port.
+--------------------------------------------------------------------------------
+
+CLASS: WeatherAgent(BaseScraper)
+
+  Cache TTL: 10 minutes
+
+  Endpoint: GET /api/latest/{node_id}
+  Response: {"node_id": "...", "conditions": "<max 300 chars>",
+             "alerts": [{type, severity, description, expires}],
+             "timestamp": "..."}
+
+  Port Coordinates:
+    Hong_Kong: 22.3193, 114.1694   Singapore: 1.3521, 103.8198
+    Shanghai: 31.2304, 121.4737    Tokyo: 35.6762, 139.6503
+    Los_Angeles: 33.7288, -118.2620
+
+  Algorithm:
+    1. Open-Meteo API (free, no key) — temperature, wind, weather code, precip
+    2. Optional: OpenWeatherMap (if OPENWEATHERMAP_API_KEY set)
+    3. SerpAPI for weather alerts (typhoon, storm, fog, tsunami keywords)
+    4. WMO weather-code → human-readable mapping
+    5. Detects alert keywords in search results → structured alerts array
+
+  WMO Codes: Full mapping from code 0 (Clear sky) through 99 (Heavy hail)
+
+
+--------------------------------------------------------------------------------
+16.7  reporter_agent.py  (Port 8006)
+     Purpose: Scores reliability of data sources per node.
+--------------------------------------------------------------------------------
+
+CLASS: ReporterAgent(BaseScraper)
+
+  Cache TTL: 60 minutes
+
+  Endpoint: GET /api/credibility/{node_id}
+  Response: {"node_id": "...", "scores": {"news": 0.82, "political": 0.75,
+             "weather": 0.91}, "updated_at": "..."}
+
+  Base Credibility Priors:
+    Hong_Kong:   news=0.80, political=0.70, weather=0.90
+    Singapore:   news=0.85, political=0.80, weather=0.92
+    Shanghai:    news=0.70, political=0.60, weather=0.88
+    Tokyo:       news=0.88, political=0.85, weather=0.95
+    Los_Angeles: news=0.90, political=0.87, weather=0.95
+
+  Dynamic Adjustment:
+    - Probes news (8002), political (8003), weather (8005) scrapers
+    - If multiple sources found → boost credibility by +0.10
+    - If thin data or failure → lower credibility by -0.15
+    - Scores clamped to [0.0, 1.0]
+
+
+--------------------------------------------------------------------------------
+16.8  run_all.py  (Launcher)
+     Purpose: Starts all 6 scrapers as subprocesses.
+--------------------------------------------------------------------------------
+
+  Usage: python scrapers/run_all.py
+  Ctrl+C gracefully terminates all subprocesses.
+  Also runnable individually: python scrapers/<agent>.py
+
+  Start order: GSCPI(8001), News(8002), Political(8003),
+               Trade(8004), Weather(8005), Reporter(8006)
+  0.5s stagger between launches to avoid port conflicts.
+  Monitors for unexpected subprocess exits.
+
+
+================================================================================
+17. SCRAPER ENVIRONMENT VARIABLES
+================================================================================
+
+  SERPAPI_API_KEY         — Required for all scrapers. SerpAPI internet search.
+  ANTHROPIC_API_KEY       — Required for GSCPI, News, Political, Trade agents.
+  OPENWEATHERMAP_API_KEY  — Optional. Weather agent uses Open-Meteo (free) by default.
+
+  Open-Meteo requires NO API key.
+  UN Comtrade basic public API requires NO key.
+
+
+================================================================================
+18. SCRAPER DEPENDENCIES (requirements_scrapers.txt)
+================================================================================
+
+  flask==2.3.2
+  flask-cors==4.0.0
+  requests==2.31.0
+  anthropic==0.23.1
+  google-search-results==2.4.2   (SerpAPI Python client)
+  colorlog==6.7.0
+  python-dateutil==2.8.2
+  pytz==2023.3
+
+  Note: No ML dependencies (torch, torch-geometric, etc.)
+
+
+================================================================================
+19. HOW TO RUN SCRAPERS
+================================================================================
+
+  Prerequisites:
+    - Python 3.8+
+    - pip install -r scrapers/requirements_scrapers.txt
+    - Set SERPAPI_API_KEY and ANTHROPIC_API_KEY environment variables
+
+  All scrapers at once:
+    python scrapers/run_all.py
+
+  Individual scrapers:
+    python scrapers/gscpi_agent.py       # starts on port 8001
+    python scrapers/news_agent.py        # starts on port 8002
+    python scrapers/political_agent.py   # starts on port 8003
+    python scrapers/trade_agent.py       # starts on port 8004
+    python scrapers/weather_agent.py     # starts on port 8005
+    python scrapers/reporter_agent.py    # starts on port 8006
+
+  Testing:
+    curl http://localhost:8001/health
+    curl http://localhost:8001/api/latest/Hong_Kong
+    curl http://localhost:8002/api/latest/Singapore
+    curl http://localhost:8003/api/latest/Shanghai
+    curl http://localhost:8004/api/latest/Tokyo
+    curl http://localhost:8005/api/latest/Los_Angeles
+    curl http://localhost:8006/api/credibility/Hong_Kong
+
+
+================================================================================
+20. SCRAPER ↔ api_server.py INTEGRATION
+================================================================================
+
+  The fetch_scraper_data() function in api_server.py has a commented-out
+  production block. Once all scrapers are running, uncomment it to switch
+  from mock data to live data:
+
+    gscpi_data["value"]          → ScraperData.gscpi
+    trade_data["volume_usd"]     → ScraperData.trade
+    news_data["summary"]         → ScraperData.news
+    political_data["report"]     → ScraperData.political
+    weather_data["conditions"]   → ScraperData.weather (append alerts if any)
+    reporter_data["scores"]      → ScraperData.reporter_credibility
+
+
+================================================================================
+END OF CONTEXT
+================================================================================
